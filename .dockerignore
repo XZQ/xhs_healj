@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.sqlite3
+.pytest_cache
+.ruff_cache
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+.env
+

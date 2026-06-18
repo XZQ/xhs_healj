@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   AlertTriangle,
+  Download,
   BarChart3,
   FileUp,
   HeartPulse,
@@ -138,6 +139,10 @@ function App() {
     }
   }
 
+  function downloadTemplate() {
+    window.location.href = `${API}/imports/template`;
+  }
+
   const healthyCount = Object.values(scores).filter((score) => score && score.total_score >= 70).length;
   const warningCount = Object.values(scores).filter(
     (score) => score && score.total_score >= 55 && score.total_score < 70
@@ -157,6 +162,7 @@ function App() {
           <button className="nav-item active"><BarChart3 size={18} />总览</button>
           <button className="nav-item"><Users size={18} />账号</button>
           <button className="nav-item"><AlertTriangle size={18} />告警</button>
+          <button className="nav-item" onClick={downloadTemplate}><Download size={18} />模板</button>
           <label className="nav-item upload">
             <FileUp size={18} />导入
             <input
@@ -303,4 +309,3 @@ function Metric({ label, value }: { label: string; value?: number | null }) {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
-

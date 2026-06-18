@@ -43,6 +43,19 @@ npm run dev
 
 前端开发服务器会把 `/api` 代理到 `http://127.0.0.1:8000`。
 
+## Docker Compose
+
+```powershell
+docker compose up --build
+```
+
+启动后访问：
+
+- Dashboard: http://127.0.0.1:5173
+- API: http://127.0.0.1:8000/api/v1/health
+
+Compose 会启动 PostgreSQL、API 和前端 Nginx。默认账号密码只用于本地开发，生产环境请改用 Secret Manager 或安全的环境变量注入。
+
 ## Database Migrations
 
 MVP 仍会在应用启动时自动创建 SQLite 表，方便开发快速运行。正式环境建议使用 Alembic：
@@ -60,6 +73,7 @@ alembic upgrade head
 | `GET` | `/api/v1/accounts` | list accounts |
 | `POST` | `/api/v1/imports/accounts` | import account snapshots and note metrics |
 | `POST` | `/api/v1/imports/account-metrics-file` | import CSV/XLSX account metrics |
+| `GET` | `/api/v1/imports/template` | download CSV import template |
 | `POST` | `/api/v1/scores/trigger` | calculate score |
 | `GET` | `/api/v1/scores/{account_id}` | latest score |
 | `GET` | `/api/v1/scores/{account_id}/history` | score history |
@@ -67,7 +81,7 @@ alembic upgrade head
 
 ## CSV/XLSX Import
 
-可以直接在前端上传 `examples/sample_import.csv`，或用 API 上传 CSV/XLSX。核心列：
+可以在前端点击“模板”下载 CSV 模板，也可以直接上传 `examples/sample_import.csv`，或用 API 上传 CSV/XLSX。核心列：
 
 ```text
 platform_uid,nickname,category,data_date,fans_count,fans_delta,total_reads,total_likes,total_collects,total_comments,total_shares,publish_count,violation_count_180d,ad_compliance_rate,audit_pass_rate,shadowban_risk,fan_quality_score,cpe,avg_cpe_benchmark,business_stability

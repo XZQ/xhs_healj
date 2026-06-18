@@ -113,3 +113,11 @@ def test_csv_file_import() -> None:
         score = client.post("/api/v1/scores/trigger", json={"account_id": account_id})
         assert score.status_code == 200
         assert score.json()["total_score"] > 0
+
+
+def test_import_template_download() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/imports/template")
+        assert response.status_code == 200
+        assert "platform_uid,nickname,category" in response.text
+        assert "attachment" in response.headers["content-disposition"]
