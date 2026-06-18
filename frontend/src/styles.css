@@ -446,6 +446,20 @@ h1 {
   line-height: 1.35;
 }
 
+.alert-item span {
+  flex: 1;
+}
+
+.alert-item button {
+  border: 0;
+  background: transparent;
+  color: #9a3b2f;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  padding: 0;
+}
+
 .suggestion {
   color: #53666b;
   font-size: 13px;

@@ -149,6 +149,11 @@ function App() {
     }
   }
 
+  async function resolveAlert(alertId: number) {
+    await request<Alert>(`/alerts/${alertId}/resolve`, { method: "PUT" });
+    setAlerts(await request<Alert[]>("/alerts"));
+  }
+
   async function uploadFile(file: File) {
     setUploading(true);
     setMessage("");
@@ -360,6 +365,13 @@ function App() {
                   <div className="alert-item" key={alert.id}>
                     <AlertTriangle size={16} />
                     <span>{alert.title}</span>
+                    {!alert.is_resolved && (
+                      <button
+                        onClick={() => resolveAlert(alert.id).catch((error) => setMessage(error.message))}
+                      >
+                        处理
+                      </button>
+                    )}
                   </div>
                 ))}
                 {!alerts.length && <div className="quiet">暂无告警</div>}

@@ -137,3 +137,41 @@ def test_import_template_download() -> None:
         assert response.status_code == 200
         assert "platform_uid,nickname,category" in response.text
         assert "attachment" in response.headers["content-disposition"]
+
+
+def test_resolve_alert() -> None:
+    platform_uid = f"alert_{uuid4().hex}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "低分账号",
+                "snapshots": [
+                    {
+                        "data_date": "2026-06-19",
+                        "fans_count": 100,
+                        "fans_delta": -20,
+                        "total_reads": 1000,
+                        "total_likes": 1,
+                        "total_collects": 1,
+                        "total_comments": 0,
+                        "total_shares": 0,
+                        "publish_count": 0,
+                    }
+                ],
+            }
+        ]
+    }
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json=payload)
+        assert imported.status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts").json()
+            if item["platform_uid"] == platform_uid
+        )
+        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+        alert = next(item for item in client.get("/api/v1/alerts").json() if item["account_id"] == account_id)
+        resolved = client.put(f"/api/v1/alerts/{alert['id']}/resolve")
+        assert resolved.status_code == 200
+        assert resolved.json()["is_resolved"] is True

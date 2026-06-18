@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,3 +16,14 @@ router = APIRouter()
 def list_alerts(session: Session = Depends(get_session)) -> list[Alert]:
     return list(session.scalars(select(Alert).order_by(Alert.created_at.desc())).all())
 
+
+@router.put("/{alert_id}/resolve", response_model=AlertOut)
+def resolve_alert(alert_id: int, session: Session = Depends(get_session)) -> Alert:
+    alert = session.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert.is_resolved = True
+    alert.resolved_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(alert)
+    return alert
