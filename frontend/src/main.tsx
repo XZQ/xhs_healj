@@ -55,6 +55,15 @@ type Alert = {
 
 type ScoreMap = Record<number, Score | null>;
 
+type OverviewStats = {
+  monitored_accounts: number;
+  healthy_accounts: number;
+  warning_accounts: number;
+  risky_accounts: number;
+  low_confidence_accounts: number;
+  unresolved_alerts: number;
+};
+
 const API = "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -77,6 +86,7 @@ function App() {
   const [accounts, setAccounts] = React.useState<Account[]>([]);
   const [scores, setScores] = React.useState<ScoreMap>({});
   const [alerts, setAlerts] = React.useState<Alert[]>([]);
+  const [overview, setOverview] = React.useState<OverviewStats | null>(null);
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
@@ -109,6 +119,7 @@ function App() {
       );
       setScores(Object.fromEntries(entries));
       setAlerts(await request<Alert[]>("/alerts"));
+      setOverview(await request<OverviewStats>("/stats/overview"));
     } finally {
       setLoading(false);
     }
@@ -127,6 +138,7 @@ function App() {
     });
     setScores((current) => ({ ...current, [accountId]: score }));
     setAlerts(await request<Alert[]>("/alerts"));
+    setOverview(await request<OverviewStats>("/stats/overview"));
   }
 
   async function scoreAllAccounts() {
@@ -143,6 +155,7 @@ function App() {
         ...Object.fromEntries(batch.map((score) => [score.account_id, score]))
       }));
       setAlerts(await request<Alert[]>("/alerts"));
+      setOverview(await request<OverviewStats>("/stats/overview"));
       setMessage(`已完成 ${batch.length} 个账号评分`);
     } finally {
       setLoading(false);
@@ -152,6 +165,7 @@ function App() {
   async function resolveAlert(alertId: number) {
     await request<Alert>(`/alerts/${alertId}/resolve`, { method: "PUT" });
     setAlerts(await request<Alert[]>("/alerts"));
+    setOverview(await request<OverviewStats>("/stats/overview"));
   }
 
   async function uploadFile(file: File) {
@@ -193,13 +207,15 @@ function App() {
     await refresh();
   }
 
-  const healthyCount = Object.values(scores).filter((score) => score && score.total_score >= 70).length;
-  const warningCount = Object.values(scores).filter(
-    (score) => score && score.total_score >= 55 && score.total_score < 70
-  ).length;
-  const lowConfidenceCount = Object.values(scores).filter(
-    (score) => score?.confidence_level === "Low"
-  ).length;
+  const monitoredCount = overview?.monitored_accounts ?? accounts.length;
+  const healthyCount =
+    overview?.healthy_accounts ?? Object.values(scores).filter((score) => score && score.total_score >= 70).length;
+  const warningCount =
+    overview?.warning_accounts ??
+    Object.values(scores).filter((score) => score && score.total_score >= 55 && score.total_score < 70).length;
+  const lowConfidenceCount =
+    overview?.low_confidence_accounts ??
+    Object.values(scores).filter((score) => score?.confidence_level === "Low").length;
 
   return (
     <div className="app-shell">
@@ -290,7 +306,7 @@ function App() {
         )}
 
         <section className="kpis">
-          <Kpi icon={<Users size={20} />} label="监控账号" value={accounts.length} />
+          <Kpi icon={<Users size={20} />} label="监控账号" value={monitoredCount} />
           <Kpi icon={<ShieldCheck size={20} />} label="健康账号" value={healthyCount} />
           <Kpi icon={<AlertTriangle size={20} />} label="预警账号" value={warningCount} />
           <Kpi icon={<Activity size={20} />} label="低置信度" value={lowConfidenceCount} />
