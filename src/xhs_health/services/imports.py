@@ -1,0 +1,271 @@
+import csv
+from io import BytesIO, StringIO
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from xhs_health.models import Account, AccountDailySnapshot, Note, NoteDailyMetric
+from xhs_health.schemas import AccountImportIn, ImportAccountsResponse
+
+
+def _jsonable(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _interaction_rate(payload: dict) -> float | None:
+    reads = payload.get("read_count")
+    if not reads:
+        return None
+    interactions = sum(
+        payload.get(key) or 0 for key in ("like_count", "collect_count", "comment_count", "share_count")
+    )
+    return interactions / reads
+
+
+def _cqi(payload: dict) -> float | None:
+    reads = payload.get("read_count")
+    if not reads:
+        return None
+    weighted = (
+        0.25 * (payload.get("like_count") or 0)
+        + 0.35 * (payload.get("collect_count") or 0)
+        + 0.25 * (payload.get("comment_count") or 0)
+        + 0.15 * (payload.get("share_count") or 0)
+    )
+    return weighted / reads
+
+
+def import_accounts(session: Session, accounts: list[AccountImportIn]) -> ImportAccountsResponse:
+    counts = {
+        "accounts_upserted": 0,
+        "snapshots_upserted": 0,
+        "notes_upserted": 0,
+        "note_metrics_upserted": 0,
+    }
+
+    for payload in accounts:
+        account = _upsert_account(session, payload)
+        counts["accounts_upserted"] += 1
+
+        for snapshot_payload in payload.snapshots:
+            snapshot_data = snapshot_payload.model_dump()
+            _upsert_snapshot(session, account.id, snapshot_data)
+            counts["snapshots_upserted"] += 1
+
+        for note_payload in payload.notes:
+            note = _upsert_note(session, account.id, note_payload.model_dump(exclude={"metrics"}))
+            counts["notes_upserted"] += 1
+            for metric_payload in note_payload.metrics:
+                metric_data = metric_payload.model_dump()
+                _upsert_note_metric(session, account.id, note.id, note.note_id, metric_data)
+                counts["note_metrics_upserted"] += 1
+
+    return ImportAccountsResponse(**counts)
+
+
+def import_flat_file(session: Session, filename: str, content: bytes) -> ImportAccountsResponse:
+    rows = _read_rows(filename, content)
+    accounts: dict[str, dict] = {}
+    for row in rows:
+        platform_uid = str(row.get("platform_uid") or "").strip()
+        if not platform_uid:
+            continue
+        account = accounts.setdefault(
+            platform_uid,
+            {
+                "platform_uid": platform_uid,
+                "nickname": str(row.get("nickname") or platform_uid),
+                "category": _empty_to_none(row.get("category")),
+                "fan_quality_score": _float_or_none(row.get("fan_quality_score")),
+                "cpe": _float_or_none(row.get("cpe")),
+                "avg_cpe_benchmark": _float_or_none(row.get("avg_cpe_benchmark")),
+                "business_stability": _float_or_none(row.get("business_stability")),
+                "violation_count_180d": _int_or_none(row.get("violation_count_180d")),
+                "ad_compliance_rate": _float_or_none(row.get("ad_compliance_rate")),
+                "audit_pass_rate": _float_or_none(row.get("audit_pass_rate")),
+                "shadowban_risk": _float_or_none(row.get("shadowban_risk")),
+                "snapshots": [],
+                "notes": [],
+            },
+        )
+        if row.get("data_date"):
+            account["snapshots"].append(
+                {
+                    "data_date": row["data_date"],
+                    "fans_count": _int_or_none(row.get("fans_count")),
+                    "fans_delta": _int_or_none(row.get("fans_delta")),
+                    "notes_count": _int_or_none(row.get("notes_count")),
+                    "total_reads": _int_or_none(row.get("total_reads")),
+                    "total_likes": _int_or_none(row.get("total_likes")),
+                    "total_collects": _int_or_none(row.get("total_collects")),
+                    "total_comments": _int_or_none(row.get("total_comments")),
+                    "total_shares": _int_or_none(row.get("total_shares")),
+                    "publish_count": _int_or_none(row.get("publish_count")),
+                    "data_source": str(row.get("data_source") or "file"),
+                }
+            )
+        note_id = _empty_to_none(row.get("note_id"))
+        if note_id:
+            account["notes"].append(
+                {
+                    "note_id": note_id,
+                    "title": _empty_to_none(row.get("note_title")),
+                    "content_type": str(row.get("content_type") or "image"),
+                    "is_ad": _bool_or_false(row.get("is_ad")),
+                    "is_original": not _bool_or_false(row.get("is_repost")),
+                    "tags": _split_tags(row.get("tags")),
+                    "metrics": [
+                        {
+                            "data_date": row["data_date"],
+                            "read_count": _int_or_none(row.get("read_count")),
+                            "like_count": _int_or_none(row.get("like_count")),
+                            "collect_count": _int_or_none(row.get("collect_count")),
+                            "comment_count": _int_or_none(row.get("comment_count")),
+                            "share_count": _int_or_none(row.get("share_count")),
+                            "data_source": str(row.get("data_source") or "file"),
+                        }
+                    ],
+                }
+            )
+    payload = [AccountImportIn.model_validate(item) for item in accounts.values()]
+    return import_accounts(session, payload)
+
+
+def _read_rows(filename: str, content: bytes) -> list[dict]:
+    lowered = filename.lower()
+    if lowered.endswith(".xlsx"):
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        sheet = workbook.active
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows:
+            return []
+        headers = [str(value).strip() if value is not None else "" for value in rows[0]]
+        return [
+            {headers[index]: value for index, value in enumerate(row) if index < len(headers)}
+            for row in rows[1:]
+        ]
+    text = content.decode("utf-8-sig")
+    return list(csv.DictReader(StringIO(text)))
+
+
+def _empty_to_none(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _float_or_none(value):
+    value = _empty_to_none(value)
+    return None if value is None else float(value)
+
+
+def _int_or_none(value):
+    value = _empty_to_none(value)
+    return None if value is None else int(float(value))
+
+
+def _bool_or_false(value):
+    value = _empty_to_none(value)
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "是"}
+
+
+def _split_tags(value):
+    value = _empty_to_none(value)
+    if value is None:
+        return []
+    return [item.strip() for item in str(value).replace("，", ",").split(",") if item.strip()]
+
+
+def _upsert_account(session: Session, payload: AccountImportIn) -> Account:
+    account = session.scalar(select(Account).where(Account.platform_uid == payload.platform_uid))
+    data = payload.model_dump(exclude={"snapshots", "notes"})
+    if account is None:
+        account = Account(**data)
+        session.add(account)
+        session.flush()
+        return account
+    for key, value in data.items():
+        setattr(account, key, value)
+    session.flush()
+    return account
+
+
+def _upsert_snapshot(session: Session, account_id: int, data: dict) -> AccountDailySnapshot:
+    snapshot = session.scalar(
+        select(AccountDailySnapshot).where(
+            AccountDailySnapshot.account_id == account_id,
+            AccountDailySnapshot.data_date == data["data_date"],
+            AccountDailySnapshot.data_source == data["data_source"],
+        )
+    )
+    if snapshot is None:
+        snapshot = AccountDailySnapshot(account_id=account_id, raw_payload=_jsonable(data), **data)
+        session.add(snapshot)
+        session.flush()
+        return snapshot
+    for key, value in data.items():
+        setattr(snapshot, key, value)
+    snapshot.raw_payload = _jsonable(data)
+    session.flush()
+    return snapshot
+
+
+def _upsert_note(session: Session, account_id: int, data: dict) -> Note:
+    note = session.scalar(select(Note).where(Note.note_id == data["note_id"]))
+    if note is None:
+        note = Note(account_id=account_id, **data)
+        session.add(note)
+        session.flush()
+        return note
+    for key, value in data.items():
+        setattr(note, key, value)
+    note.account_id = account_id
+    session.flush()
+    return note
+
+
+def _upsert_note_metric(
+    session: Session,
+    account_id: int,
+    note_pk: int,
+    note_id: str,
+    data: dict,
+) -> NoteDailyMetric:
+    metric = session.scalar(
+        select(NoteDailyMetric).where(
+            NoteDailyMetric.note_id == note_id,
+            NoteDailyMetric.data_date == data["data_date"],
+            NoteDailyMetric.data_source == data["data_source"],
+        )
+    )
+    data["interaction_rate"] = _interaction_rate(data)
+    data["cqi"] = _cqi(data)
+    if metric is None:
+        metric = NoteDailyMetric(
+            account_id=account_id,
+            note_pk=note_pk,
+            note_id=note_id,
+            raw_payload=_jsonable(data),
+            **data,
+        )
+        session.add(metric)
+        session.flush()
+        return metric
+    for key, value in data.items():
+        setattr(metric, key, value)
+    metric.account_id = account_id
+    metric.note_pk = note_pk
+    metric.raw_payload = _jsonable(data)
+    session.flush()
+    return metric
