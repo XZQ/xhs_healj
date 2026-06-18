@@ -7,6 +7,7 @@ import {
   BarChart3,
   FileUp,
   HeartPulse,
+  Plus,
   RefreshCw,
   ShieldCheck,
   Users
@@ -80,6 +81,12 @@ function App() {
   const [loading, setLoading] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [message, setMessage] = React.useState("");
+  const [showCreate, setShowCreate] = React.useState(false);
+  const [newAccount, setNewAccount] = React.useState({
+    platform_uid: "",
+    nickname: "",
+    category: ""
+  });
 
   const selectedAccount = accounts.find((account) => account.id === selectedId) ?? accounts[0];
   const selectedScore = selectedAccount ? scores[selectedAccount.id] : null;
@@ -143,6 +150,24 @@ function App() {
     window.location.href = `${API}/imports/template`;
   }
 
+  async function createAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+    const account = await request<Account>("/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform_uid: newAccount.platform_uid.trim(),
+        nickname: newAccount.nickname.trim(),
+        category: newAccount.category.trim() || null
+      })
+    });
+    setNewAccount({ platform_uid: "", nickname: "", category: "" });
+    setShowCreate(false);
+    setSelectedId(account.id);
+    await refresh();
+  }
+
   const healthyCount = Object.values(scores).filter((score) => score && score.total_score >= 70).length;
   const warningCount = Object.values(scores).filter(
     (score) => score && score.total_score >= 55 && score.total_score < 70
@@ -160,6 +185,9 @@ function App() {
         </div>
         <nav>
           <button className="nav-item active"><BarChart3 size={18} />总览</button>
+          <button className="nav-item" onClick={() => setShowCreate((value) => !value)}>
+            <Plus size={18} />添加
+          </button>
           <button className="nav-item"><Users size={18} />账号</button>
           <button className="nav-item"><AlertTriangle size={18} />告警</button>
           <button className="nav-item" onClick={downloadTemplate}><Download size={18} />模板</button>
@@ -188,6 +216,47 @@ function App() {
 
         {message && <div className="notice">{message}</div>}
         {uploading && <div className="notice muted">正在导入文件...</div>}
+
+        {showCreate && (
+          <form
+            className="create-panel"
+            onSubmit={(event) => createAccount(event).catch((error) => setMessage(error.message))}
+          >
+            <label>
+              <span>平台 UID</span>
+              <input
+                value={newAccount.platform_uid}
+                onChange={(event) =>
+                  setNewAccount((current) => ({ ...current, platform_uid: event.target.value }))
+                }
+                required
+                placeholder="例如 5a1234567890"
+              />
+            </label>
+            <label>
+              <span>昵称</span>
+              <input
+                value={newAccount.nickname}
+                onChange={(event) =>
+                  setNewAccount((current) => ({ ...current, nickname: event.target.value }))
+                }
+                required
+                placeholder="博主昵称"
+              />
+            </label>
+            <label>
+              <span>赛道</span>
+              <input
+                value={newAccount.category}
+                onChange={(event) =>
+                  setNewAccount((current) => ({ ...current, category: event.target.value }))
+                }
+                placeholder="美妆护肤"
+              />
+            </label>
+            <button type="submit">添加账号</button>
+          </form>
+        )}
 
         <section className="kpis">
           <Kpi icon={<Users size={20} />} label="监控账号" value={accounts.length} />
