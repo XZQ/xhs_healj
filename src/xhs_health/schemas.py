@@ -122,3 +122,12 @@ class AlertOut(BaseModel):
     threshold_value: float | None
     is_resolved: bool
     created_at: datetime
+
+
+class OverviewStatsOut(BaseModel):
+    monitored_accounts: int
+    healthy_accounts: int
+    warning_accounts: int
+    risky_accounts: int
+    low_confidence_accounts: int
+    unresolved_alerts: int

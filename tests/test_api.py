@@ -100,6 +100,10 @@ def test_import_and_score_flow() -> None:
         assert mixed_batch.status_code == 200
         assert [item["account_id"] for item in mixed_batch.json()] == [account_id]
 
+        overview = client.get("/api/v1/stats/overview")
+        assert overview.status_code == 200
+        assert overview.json()["monitored_accounts"] >= 1
+
 
 def test_csv_file_import() -> None:
     platform_uid = f"uid_{uuid4().hex}"
