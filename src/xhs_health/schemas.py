@@ -83,6 +83,11 @@ class TriggerScoreRequest(BaseModel):
     score_date: date | None = None
 
 
+class BatchTriggerScoreRequest(BaseModel):
+    account_ids: list[int] | None = None
+    score_date: date | None = None
+
+
 class ScoreOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -117,4 +122,3 @@ class AlertOut(BaseModel):
     threshold_value: float | None
     is_resolved: bool
     created_at: datetime
-

@@ -129,6 +129,26 @@ function App() {
     setAlerts(await request<Alert[]>("/alerts"));
   }
 
+  async function scoreAllAccounts() {
+    setLoading(true);
+    setMessage("");
+    try {
+      const batch = await request<Score[]>("/scores/batch-trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      setScores((current) => ({
+        ...current,
+        ...Object.fromEntries(batch.map((score) => [score.account_id, score]))
+      }));
+      setAlerts(await request<Alert[]>("/alerts"));
+      setMessage(`已完成 ${batch.length} 个账号评分`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function uploadFile(file: File) {
     setUploading(true);
     setMessage("");
@@ -208,10 +228,16 @@ function App() {
             <h1>账号健康监控</h1>
             <p>按数据完整度、健康评分和告警信号跟踪博主账号。</p>
           </div>
-          <button className="primary-action" onClick={() => refresh()} disabled={loading}>
-            <RefreshCw size={17} />
-            {loading ? "刷新中" : "刷新"}
-          </button>
+          <div className="top-actions">
+            <button className="secondary-action" onClick={() => scoreAllAccounts()} disabled={loading}>
+              <Activity size={17} />
+              一键评分
+            </button>
+            <button className="primary-action" onClick={() => refresh()} disabled={loading}>
+              <RefreshCw size={17} />
+              {loading ? "刷新中" : "刷新"}
+            </button>
+          </div>
         </header>
 
         {message && <div className="notice">{message}</div>}

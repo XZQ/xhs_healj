@@ -84,6 +84,22 @@ def test_import_and_score_flow() -> None:
         assert latest.status_code == 200
         assert latest.json()["id"] == body["id"]
 
+        batch = client.post("/api/v1/scores/batch-trigger", json={"account_ids": [account_id]})
+        assert batch.status_code == 200
+        assert batch.json()[0]["account_id"] == account_id
+
+        empty = client.post(
+            "/api/v1/accounts",
+            json={"platform_uid": f"empty_{platform_uid}", "nickname": "空数据账号"},
+        )
+        assert empty.status_code == 200
+        mixed_batch = client.post(
+            "/api/v1/scores/batch-trigger",
+            json={"account_ids": [account_id, empty.json()["id"]]},
+        )
+        assert mixed_batch.status_code == 200
+        assert [item["account_id"] for item in mixed_batch.json()] == [account_id]
+
 
 def test_csv_file_import() -> None:
     platform_uid = f"uid_{uuid4().hex}"
