@@ -179,3 +179,32 @@ def test_resolve_alert() -> None:
         resolved = client.put(f"/api/v1/alerts/{alert['id']}/resolve")
         assert resolved.status_code == 200
         assert resolved.json()["is_resolved"] is True
+
+
+def test_account_status_update_filter_and_archive() -> None:
+    platform_uid = f"status_{uuid4().hex}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/accounts",
+            json={"platform_uid": platform_uid, "nickname": "Status Account", "category": "ops"},
+        )
+        assert created.status_code == 200
+        account_id = created.json()["id"]
+        assert created.json()["status"] == "active"
+
+        paused = client.put(f"/api/v1/accounts/{account_id}", json={"status": "paused"})
+        assert paused.status_code == 200
+        assert paused.json()["status"] == "paused"
+
+        paused_accounts = client.get("/api/v1/accounts?status=paused")
+        assert paused_accounts.status_code == 200
+        assert any(item["id"] == account_id for item in paused_accounts.json())
+
+        archived = client.delete(f"/api/v1/accounts/{account_id}")
+        assert archived.status_code == 200
+        assert archived.json()["status"] == "archived"
+
+        active_accounts = client.get("/api/v1/accounts?status=active")
+        assert active_accounts.status_code == 200
+        assert all(item["id"] != account_id for item in active_accounts.json())

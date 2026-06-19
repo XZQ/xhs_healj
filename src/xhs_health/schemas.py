@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,6 +10,14 @@ class AccountCreate(BaseModel):
     avatar_url: str | None = None
     category: str | None = None
     tags: list[str] = Field(default_factory=list)
+
+
+class AccountUpdate(BaseModel):
+    nickname: str | None = None
+    avatar_url: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+    status: Literal["active", "paused", "archived"] | None = None
 
 
 class AccountOut(AccountCreate):

@@ -54,6 +54,7 @@ type Alert = {
 };
 
 type ScoreMap = Record<number, Score | null>;
+type AccountStatusFilter = "all" | "active" | "paused" | "archived";
 
 type OverviewStats = {
   monitored_accounts: number;
@@ -65,6 +66,19 @@ type OverviewStats = {
 };
 
 const API = "/api/v1";
+
+const STATUS_LABELS: Record<string, string> = {
+  active: "监控中",
+  paused: "已暂停",
+  archived: "已归档"
+};
+
+const STATUS_FILTERS: Array<{ value: AccountStatusFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "active", label: "监控中" },
+  { value: "paused", label: "已暂停" },
+  { value: "archived", label: "已归档" }
+];
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, init);
@@ -92,6 +106,7 @@ function App() {
   const [uploading, setUploading] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [showCreate, setShowCreate] = React.useState(false);
+  const [statusFilter, setStatusFilter] = React.useState<AccountStatusFilter>("all");
   const [newAccount, setNewAccount] = React.useState({
     platform_uid: "",
     nickname: "",
@@ -104,9 +119,12 @@ function App() {
   async function refresh() {
     setLoading(true);
     try {
-      const nextAccounts = await request<Account[]>("/accounts");
+      const nextAccounts = await request<Account[]>(`/accounts${statusFilter === "all" ? "" : `?status=${statusFilter}`}`);
       setAccounts(nextAccounts);
-      if (!selectedId && nextAccounts[0]) setSelectedId(nextAccounts[0].id);
+      if (nextAccounts.length && !nextAccounts.some((account) => account.id === selectedId)) {
+        setSelectedId(nextAccounts[0].id);
+      }
+      if (!nextAccounts.length) setSelectedId(null);
       const entries = await Promise.all(
         nextAccounts.map(async (account) => {
           try {
@@ -127,7 +145,7 @@ function App() {
 
   React.useEffect(() => {
     refresh().catch((error) => setMessage(error.message));
-  }, []);
+  }, [statusFilter]);
 
   async function triggerScore(accountId: number) {
     setMessage("");
@@ -166,6 +184,20 @@ function App() {
     await request<Alert>(`/alerts/${alertId}/resolve`, { method: "PUT" });
     setAlerts(await request<Alert[]>("/alerts"));
     setOverview(await request<OverviewStats>("/stats/overview"));
+  }
+
+  async function updateAccountStatus(accountId: number, status: "active" | "paused") {
+    await request<Account>(`/accounts/${accountId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status })
+    });
+    await refresh();
+  }
+
+  async function archiveAccount(accountId: number) {
+    await request<Account>(`/accounts/${accountId}`, { method: "DELETE" });
+    await refresh();
   }
 
   async function uploadFile(file: File) {
@@ -316,7 +348,18 @@ function App() {
           <div className="panel account-panel">
             <div className="section-heading">
               <h2>账号列表</h2>
-              <span>{accounts.length} 条</span>
+              <div className="status-filters">
+                {STATUS_FILTERS.map((item) => (
+                  <button
+                    className={statusFilter === item.value ? "active" : ""}
+                    key={item.value}
+                    onClick={() => setStatusFilter(item.value)}
+                    type="button"
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="table">
               <div className="table-row table-head">
@@ -337,11 +380,12 @@ function App() {
                     <span>
                       <strong>{account.nickname}</strong>
                       <small>{account.platform_uid}</small>
+                      <small className={`status-pill ${account.status}`}>{STATUS_LABELS[account.status] ?? account.status}</small>
                     </span>
                     <span>{account.category || "未分类"}</span>
                     <span className={`score ${scoreTone(score)}`}>{score ? score.total_score.toFixed(1) : "待评分"}</span>
                     <span>{score?.confidence_level || "-"}</span>
-                    <span>
+                    <span className="row-actions">
                       <span
                         className="link-button"
                         onClick={(event) => {
@@ -351,6 +395,31 @@ function App() {
                       >
                         评分
                       </span>
+                      {account.status !== "archived" && (
+                        <span
+                          className="link-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            updateAccountStatus(
+                              account.id,
+                              account.status === "paused" ? "active" : "paused"
+                            ).catch((error) => setMessage(error.message));
+                          }}
+                        >
+                          {account.status === "paused" ? "恢复" : "暂停"}
+                        </span>
+                      )}
+                      {account.status !== "archived" && (
+                        <span
+                          className="link-button danger"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            archiveAccount(account.id).catch((error) => setMessage(error.message));
+                          }}
+                        >
+                          归档
+                        </span>
+                      )}
                     </span>
                   </button>
                 );
