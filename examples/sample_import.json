@@ -1,0 +1,115 @@
+{
+  "accounts": [
+    {
+      "platform_uid": "fake_001",
+      "nickname": "夏柚的护肤日记",
+      "category": "美妆护肤",
+      "tags": ["护肤", "种草", "敏感肌"],
+      "fan_quality_score": 0.82,
+      "cpe": 1.8,
+      "avg_cpe_benchmark": 3.0,
+      "business_stability": 0.88,
+      "violation_count_180d": 0,
+      "ad_compliance_rate": 0.98,
+      "audit_pass_rate": 0.97,
+      "shadowban_risk": 0.03,
+      "snapshots": [
+        { "data_date": "2026-06-19", "fans_count": 48000, "fans_delta": 420, "notes_count": 118, "total_reads": 156000, "total_likes": 7100, "total_collects": 4400, "total_comments": 780, "total_shares": 260, "publish_count": 1, "data_source": "manual" },
+        { "data_date": "2026-06-20", "fans_count": 49200, "fans_delta": 1200, "notes_count": 119, "total_reads": 168000, "total_likes": 7600, "total_collects": 4750, "total_comments": 830, "total_shares": 285, "publish_count": 1, "data_source": "manual" },
+        { "data_date": "2026-06-21", "fans_count": 50600, "fans_delta": 1400, "notes_count": 120, "total_reads": 174000, "total_likes": 7900, "total_collects": 4950, "total_comments": 870, "total_shares": 295, "publish_count": 0, "data_source": "manual" },
+        { "data_date": "2026-06-22", "fans_count": 52400, "fans_delta": 1800, "notes_count": 122, "total_reads": 186000, "total_likes": 8400, "total_collects": 5200, "total_comments": 940, "total_shares": 320, "publish_count": 2, "data_source": "manual" }
+      ],
+      "notes": [
+        {
+          "note_id": "fake_note_001",
+          "title": "夏季敏感肌维稳清单｜精简到 4 步",
+          "content_type": "image",
+          "publish_time": "2026-06-19T10:00:00+08:00",
+          "is_ad": false,
+          "is_original": true,
+          "tags": ["护肤", "敏感肌", "夏季"],
+          "metrics": [
+            { "data_date": "2026-06-19", "read_count": 26000, "like_count": 1600, "collect_count": 1100, "comment_count": 160, "share_count": 60, "data_source": "manual" },
+            { "data_date": "2026-06-22", "read_count": 33000, "like_count": 2100, "collect_count": 1450, "comment_count": 210, "share_count": 78, "data_source": "manual" }
+          ]
+        },
+        {
+          "note_id": "fake_note_002",
+          "title": "平价防晒实测｜油皮不闷痘的 3 支",
+          "content_type": "video",
+          "publish_time": "2026-06-22T19:30:00+08:00",
+          "is_ad": true,
+          "is_original": true,
+          "tags": ["防晒", "油皮", "测评"],
+          "metrics": [
+            { "data_date": "2026-06-22", "read_count": 12000, "like_count": 950, "collect_count": 720, "comment_count": 90, "share_count": 30, "data_source": "manual" }
+          ]
+        }
+      ]
+    },
+    {
+      "platform_uid": "fake_002",
+      "nickname": "暮野家居Studio",
+      "category": "家居生活",
+      "tags": ["家居", "收纳", "小户型"],
+      "fan_quality_score": 0.51,
+      "cpe": 4.2,
+      "avg_cpe_benchmark": 2.6,
+      "business_stability": 0.43,
+      "violation_count_180d": 3,
+      "ad_compliance_rate": 0.71,
+      "audit_pass_rate": 0.78,
+      "shadowban_risk": 0.42,
+      "snapshots": [
+        { "data_date": "2026-06-19", "fans_count": 22000, "fans_delta": -500, "notes_count": 64, "total_reads": 64000, "total_likes": 1500, "total_collects": 620, "total_comments": 150, "total_shares": 55, "publish_count": 1, "data_source": "manual" },
+        { "data_date": "2026-06-20", "fans_count": 21500, "fans_delta": -500, "notes_count": 64, "total_reads": 58000, "total_likes": 1300, "total_collects": 540, "total_comments": 120, "total_shares": 40, "publish_count": 0, "data_source": "manual" },
+        { "data_date": "2026-06-21", "fans_count": 20800, "fans_delta": -700, "notes_count": 64, "total_reads": 49000, "total_likes": 1050, "total_collects": 410, "total_comments": 90, "total_shares": 28, "publish_count": 0, "data_source": "manual" },
+        { "data_date": "2026-06-22", "fans_count": 19900, "fans_delta": -900, "notes_count": 63, "total_reads": 39000, "total_likes": 820, "total_collects": 300, "total_comments": 60, "total_shares": 18, "publish_count": 1, "data_source": "manual" }
+      ],
+      "notes": [
+        {
+          "note_id": "fake_note_003",
+          "title": "出租屋改造｜花 500 块搞定的收纳墙",
+          "content_type": "video",
+          "publish_time": "2026-06-19T20:00:00+08:00",
+          "is_ad": false,
+          "is_original": true,
+          "tags": ["家居", "收纳", "出租屋"],
+          "metrics": [
+            { "data_date": "2026-06-19", "read_count": 18000, "like_count": 480, "collect_count": 260, "comment_count": 55, "share_count": 20, "data_source": "manual" },
+            { "data_date": "2026-06-22", "read_count": 21000, "like_count": 540, "collect_count": 290, "comment_count": 62, "share_count": 22, "data_source": "manual" }
+          ]
+        }
+      ]
+    },
+    {
+      "platform_uid": "fake_003",
+      "nickname": "老街口美食探店",
+      "category": "美食",
+      "tags": ["探店", "本地美食"],
+      "fan_quality_score": 0.68,
+      "cpe": 2.9,
+      "avg_cpe_benchmark": 2.4,
+      "business_stability": 0.6,
+      "violation_count_180d": 1,
+      "snapshots": [
+        { "data_date": "2026-06-20", "fans_count": 10000, "fans_delta": 200, "notes_count": 41, "total_reads": 32000, "total_likes": 1200, "publish_count": 1, "data_source": "manual" },
+        { "data_date": "2026-06-22", "fans_count": 10400, "fans_delta": 250, "notes_count": 42, "total_reads": 38000, "total_likes": 1450, "publish_count": 1, "data_source": "manual" }
+      ],
+      "notes": [
+        {
+          "note_id": "fake_note_004",
+          "title": "藏在巷子里的牛杂煲｜人均 35 吃饱",
+          "content_type": "image",
+          "publish_time": "2026-06-20T12:00:00+08:00",
+          "is_ad": false,
+          "is_original": true,
+          "tags": ["探店", "牛杂"],
+          "metrics": [
+            { "data_date": "2026-06-20", "read_count": 15000, "like_count": 620, "collect_count": 210, "comment_count": 80, "share_count": 25, "data_source": "manual" }
+          ]
+        }
+      ]
+    }
+  ]
+}
