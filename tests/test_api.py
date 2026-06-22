@@ -458,3 +458,32 @@ def test_reports_xlsx_and_single_account_json() -> None:
         assert body["account"]["id"] == account_id
         assert body["latest_score"]["account_id"] == account_id
         assert "suggestions" in body["summary"]
+
+
+def test_accounts_pagination() -> None:
+    prefix = f"page_{uuid4().hex}"
+    accounts_in = [
+        {"platform_uid": f"{prefix}_{i}", "nickname": f"Page Account {i}"}
+        for i in range(3)
+    ]
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json={"accounts": accounts_in})
+        assert imported.status_code == 200
+
+        first = client.get(f"/api/v1/accounts?status=active&limit=2&offset=0")
+        assert first.status_code == 200
+        first_body = first.json()
+        assert len(first_body) <= 2
+        assert first.headers.get("x-total-count") is not None
+        total = int(first.headers["x-total-count"])
+        assert total >= 3
+
+        second = client.get(f"/api/v1/accounts?status=active&limit=2&offset=2")
+        assert second.status_code == 200
+        second_body = second.json()
+        assert int(second.headers["x-total-count"]) == total
+
+        first_ids = {item["id"] for item in first_body}
+        second_ids = {item["id"] for item in second_body}
+        assert first_ids.isdisjoint(second_ids)

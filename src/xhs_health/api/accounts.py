@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
@@ -32,14 +32,22 @@ def create_account(payload: AccountCreate, session: Session = Depends(get_sessio
 def list_accounts(
     status: str | None = None,
     group_id: int | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    response: Response = None,
     session: Session = Depends(get_session),
 ) -> list[AccountOut]:
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
     stmt = select(Account)
     if status:
         stmt = stmt.where(Account.status == status)
     if group_id is not None:
         stmt = stmt.join(AccountGroupMember).where(AccountGroupMember.group_id == group_id)
-    accounts = list(session.scalars(stmt.order_by(Account.id.desc())).all())
+    total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+    if response is not None:
+        response.headers["X-Total-Count"] = str(total)
+    accounts = list(session.scalars(stmt.order_by(Account.id.desc()).limit(limit).offset(offset)).all())
     return [_account_out(account) for account in accounts]
 
 
