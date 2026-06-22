@@ -1,10 +1,11 @@
 import csv
+from datetime import date
 from io import BytesIO, StringIO
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from xhs_health.models import Account, AccountDailySnapshot, Note, NoteDailyMetric
+from xhs_health.models import Account, AccountDailySnapshot, ImportBatch, ImportErrorRow, Note, NoteDailyMetric
 from xhs_health.schemas import AccountImportIn, ImportAccountsResponse
 
 
@@ -71,8 +72,27 @@ def import_accounts(session: Session, accounts: list[AccountImportIn]) -> Import
 
 def import_flat_file(session: Session, filename: str, content: bytes) -> ImportAccountsResponse:
     rows = _read_rows(filename, content)
+    batch = ImportBatch(filename=filename, total_rows=len(rows), valid_rows=0, error_rows=0)
+    session.add(batch)
+    session.flush()
+
     accounts: dict[str, dict] = {}
-    for row in rows:
+    for index, row in enumerate(rows, start=2):
+        errors = _validate_row(row)
+        if errors:
+            for field_name, message in errors:
+                session.add(
+                    ImportErrorRow(
+                        batch_id=batch.id,
+                        row_number=index,
+                        field_name=field_name,
+                        message=message,
+                        raw_payload=_jsonable(row),
+                    )
+                )
+            batch.error_rows += 1
+            continue
+
         platform_uid = str(row.get("platform_uid") or "").strip()
         if not platform_uid:
             continue
@@ -133,8 +153,68 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                     ],
                 }
             )
+        batch.valid_rows += 1
     payload = [AccountImportIn.model_validate(item) for item in accounts.values()]
-    return import_accounts(session, payload)
+    result = import_accounts(session, payload)
+    result.import_batch_id = batch.id
+    result.total_rows = batch.total_rows
+    result.error_rows = batch.error_rows
+    batch.status = "completed_with_errors" if batch.error_rows else "completed"
+    return result
+
+
+def _validate_row(row: dict) -> list[tuple[str, str]]:
+    errors: list[tuple[str, str]] = []
+    if not _empty_to_none(row.get("platform_uid")):
+        errors.append(("platform_uid", "platform_uid is required"))
+
+    if _empty_to_none(row.get("data_date")):
+        try:
+            date.fromisoformat(str(row["data_date"]))
+        except ValueError:
+            errors.append(("data_date", "data_date must be YYYY-MM-DD"))
+
+    for field_name in (
+        "fans_count",
+        "fans_delta",
+        "notes_count",
+        "total_reads",
+        "total_likes",
+        "total_collects",
+        "total_comments",
+        "total_shares",
+        "publish_count",
+        "violation_count_180d",
+        "read_count",
+        "like_count",
+        "collect_count",
+        "comment_count",
+        "share_count",
+    ):
+        if _empty_to_none(row.get(field_name)) is not None:
+            try:
+                int(float(row[field_name]))
+            except (TypeError, ValueError):
+                errors.append((field_name, f"{field_name} must be an integer"))
+
+    for field_name in (
+        "ad_compliance_rate",
+        "audit_pass_rate",
+        "shadowban_risk",
+        "fan_quality_score",
+        "cpe",
+        "avg_cpe_benchmark",
+        "business_stability",
+    ):
+        if _empty_to_none(row.get(field_name)) is not None:
+            try:
+                float(row[field_name])
+            except (TypeError, ValueError):
+                errors.append((field_name, f"{field_name} must be a number"))
+
+    if _empty_to_none(row.get("note_id")) and not _empty_to_none(row.get("data_date")):
+        errors.append(("data_date", "note metric rows require data_date"))
+    return errors
 
 
 def _read_rows(filename: str, content: bytes) -> list[dict]:

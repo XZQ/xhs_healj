@@ -1,11 +1,13 @@
 .venv/
 __pycache__/
+.uploads/
 *.py[cod]
 *.sqlite3
 *.db
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.codex/*.log
 .env
 .env.*
 !.env.example
@@ -15,6 +17,5 @@ build/
 frontend/dist/
 frontend/node_modules/
 frontend/*.tsbuildinfo
-src/xhs_health/tools/
 htmlcov/
 .coverage

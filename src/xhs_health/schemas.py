@@ -25,6 +25,7 @@ class AccountOut(AccountCreate):
 
     id: int
     status: str
+    group_ids: list[int] = Field(default_factory=list)
 
 
 class AccountSnapshotIn(BaseModel):
@@ -84,6 +85,9 @@ class ImportAccountsResponse(BaseModel):
     snapshots_upserted: int
     notes_upserted: int
     note_metrics_upserted: int
+    import_batch_id: int | None = None
+    total_rows: int | None = None
+    error_rows: int = 0
 
 
 class TriggerScoreRequest(BaseModel):
@@ -132,6 +136,185 @@ class AlertOut(BaseModel):
     created_at: datetime
 
 
+class AccountGroupCreate(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class AccountGroupOut(AccountGroupCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_ids: list[int] = Field(default_factory=list)
+    created_at: datetime
+
+
+class AccountGroupMembershipRequest(BaseModel):
+    account_ids: list[int]
+
+
+class AlertRuleCreate(BaseModel):
+    name: str
+    alert_type: str
+    metric_name: str
+    operator: Literal["lt", "lte", "gt", "gte", "eq"] = "lt"
+    threshold_value: float
+    severity: Literal["info", "warning", "critical"] = "warning"
+    enabled: bool = True
+    cooldown_minutes: int = 1440
+
+
+class AlertRuleUpdate(BaseModel):
+    name: str | None = None
+    alert_type: str | None = None
+    metric_name: str | None = None
+    operator: Literal["lt", "lte", "gt", "gte", "eq"] | None = None
+    threshold_value: float | None = None
+    severity: Literal["info", "warning", "critical"] | None = None
+    enabled: bool | None = None
+    cooldown_minutes: int | None = None
+
+
+class AlertRuleOut(AlertRuleCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+
+
+class ImportBatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    filename: str
+    total_rows: int
+    valid_rows: int
+    error_rows: int
+    status: str
+    created_at: datetime
+
+
+class ImportErrorRowOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    batch_id: int
+    row_number: int
+    field_name: str
+    message: str
+    raw_payload: dict[str, Any]
+    created_at: datetime
+
+
+class DataSourceVerificationCreate(BaseModel):
+    source: str
+    interface_name: str | None = None
+    auth_method: str | None = None
+    authorization_subject: str | None = None
+    requires_creator_authorization: bool = True
+    available_fields: list[str] = Field(default_factory=list)
+    rate_limit: str | None = None
+    history_range: str | None = None
+    commercial_usage: str | None = None
+    fallback_strategy: str | None = None
+    status: Literal["pending", "verified", "blocked", "rejected"] = "pending"
+    notes: str | None = None
+
+
+class DataSourceVerificationOut(DataSourceVerificationCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AccountAuthorizationCreate(BaseModel):
+    authorization_type: Literal["manual", "oauth", "contract", "platform"] = "manual"
+    authorized_by: str | None = None
+    scope: dict[str, Any] = Field(default_factory=dict)
+    starts_at: datetime | None = None
+    expires_at: datetime | None = None
+    proof_url: str | None = None
+
+
+class AccountAuthorizationOut(AccountAuthorizationCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_id: int
+    revoked_at: datetime | None
+    created_at: datetime
+
+
+class AccountDataDeletionRequest(BaseModel):
+    mode: Literal["anonymize", "delete"] = "anonymize"
+    actor: str | None = None
+    reason: str | None = None
+
+
+class AccountDataActionOut(BaseModel):
+    account_id: int
+    action: str
+    status: str
+    deleted_records: dict[str, int] = Field(default_factory=dict)
+
+
+class NotificationChannelCreate(BaseModel):
+    name: str
+    channel_type: Literal["email", "webhook", "feishu", "dingtalk", "wecom"]
+    target: str | None = None
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class NotificationChannelUpdate(BaseModel):
+    name: str | None = None
+    channel_type: Literal["email", "webhook", "feishu", "dingtalk", "wecom"] | None = None
+    target: str | None = None
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+
+
+class NotificationChannelOut(NotificationChannelCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationTestRequest(BaseModel):
+    event_type: str = "health_alert"
+    dry_run: bool = True
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class NotificationDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    channel_id: int | None
+    event_type: str
+    target: str | None
+    status: str
+    payload: dict[str, Any]
+    error_message: str | None
+    created_at: datetime
+
+
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor: str | None
+    action: str
+    target_type: str | None
+    target_id: str | None
+    detail: dict[str, Any]
+    created_at: datetime
+
+
 class OverviewStatsOut(BaseModel):
     monitored_accounts: int
     healthy_accounts: int
@@ -139,3 +322,26 @@ class OverviewStatsOut(BaseModel):
     risky_accounts: int
     low_confidence_accounts: int
     unresolved_alerts: int
+
+
+class SchedulerStatusOut(BaseModel):
+    name: str
+    enabled: bool
+    interval_seconds: int
+    running: bool
+    last_started_at: datetime | None
+    last_finished_at: datetime | None
+    last_status: str
+    last_message: str | None
+    total_runs: int
+    scores_created: int
+
+
+class XhsIntegrationStatusOut(BaseModel):
+    mode: str
+    configured: bool
+    message: str
+
+
+class XhsSyncRequest(BaseModel):
+    platform_uid: str

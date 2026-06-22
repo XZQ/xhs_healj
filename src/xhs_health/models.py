@@ -37,6 +37,31 @@ class Account(Base):
     notes: Mapped[list["Note"]] = relationship(back_populates="account")
     scores: Mapped[list["Score"]] = relationship(back_populates="account")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="account")
+    group_links: Mapped[list["AccountGroupMember"]] = relationship(back_populates="account")
+
+
+class AccountGroup(Base):
+    __tablename__ = "account_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    members: Mapped[list["AccountGroupMember"]] = relationship(back_populates="group")
+
+
+class AccountGroupMember(Base):
+    __tablename__ = "account_group_members"
+    __table_args__ = (UniqueConstraint("group_id", "account_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("account_groups.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    group: Mapped[AccountGroup] = relationship(back_populates="members")
+    account: Mapped[Account] = relationship(back_populates="group_links")
 
 
 class AccountDailySnapshot(Base):
@@ -147,3 +172,125 @@ class Alert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     account: Mapped[Account] = relationship(back_populates="alerts")
+
+
+class AlertRule(Base):
+    __tablename__ = "alert_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    alert_type: Mapped[str] = mapped_column(String(64), index=True)
+    metric_name: Mapped[str] = mapped_column(String(64))
+    operator: Mapped[str] = mapped_column(String(8), default="lt")
+    threshold_value: Mapped[float] = mapped_column(Numeric(12, 4))
+    severity: Mapped[str] = mapped_column(String(16), default="warning")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ImportBatch(Base):
+    __tablename__ = "import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    filename: Mapped[str] = mapped_column(String(256))
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    valid_rows: Mapped[int] = mapped_column(Integer, default=0)
+    error_rows: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="completed")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    errors: Mapped[list["ImportErrorRow"]] = relationship(back_populates="batch")
+
+
+class ImportErrorRow(Base):
+    __tablename__ = "import_error_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    row_number: Mapped[int] = mapped_column(Integer)
+    field_name: Mapped[str] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(String(256))
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    batch: Mapped[ImportBatch] = relationship(back_populates="errors")
+
+
+class DataSourceVerification(Base):
+    __tablename__ = "data_source_verifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    interface_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    auth_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    authorization_subject: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requires_creator_authorization: Mapped[bool] = mapped_column(Boolean, default=True)
+    available_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rate_limit: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    history_range: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    commercial_usage: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    fallback_strategy: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AccountAuthorization(Base):
+    __tablename__ = "account_authorizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    authorization_type: Mapped[str] = mapped_column(String(32))
+    authorized_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    proof_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotificationChannel(Base):
+    __tablename__ = "notification_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    channel_type: Mapped[str] = mapped_column(String(32), index=True)
+    target: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_channels.id"), index=True, nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="dry_run", index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 feishu-upload-doc = "xhs_health.tools.feishu_upload:main"
+feishu-transfer-owner = "xhs_health.tools.feishu_transfer_owner:main"
 
 [project.optional-dependencies]
 dev = [

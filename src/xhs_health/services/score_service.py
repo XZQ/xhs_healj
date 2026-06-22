@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from xhs_health.models import Account, AccountDailySnapshot, Alert, Note, NoteDailyMetric, Score
+from xhs_health.models import Account, AccountDailySnapshot, Alert, AlertRule, Note, NoteDailyMetric, Score
 from xhs_health.services.scoring import MODEL_VERSION, HealthScoreEngine
 
 
@@ -155,10 +155,22 @@ def _latest_note_metrics(session: Session, account_id: int) -> list[dict[str, An
 def _refresh_score_alerts(
     session: Session, account: Account, score: Score, warning_flags: list[str]
 ) -> None:
+    latest, previous = _latest_snapshots(session, account.id)
+    generated_types = [
+        "low_score",
+        "low_confidence",
+        "interaction_drop",
+        "fan_loss",
+        "inactive",
+        "shadowban_risk",
+    ]
+    generated_types.extend(
+        session.scalars(select(AlertRule.alert_type).where(AlertRule.enabled.is_(True))).all()
+    )
     session.execute(
         delete(Alert).where(
             Alert.account_id == account.id,
-            Alert.alert_type.in_(["low_score", "low_confidence"]),
+            Alert.alert_type.in_(generated_types),
             Alert.is_resolved.is_(False),
         )
     )
@@ -188,4 +200,173 @@ def _refresh_score_alerts(
                 threshold_value=0.6,
             )
         )
+    if latest is not None and previous is not None:
+        latest_interaction = _snapshot_interaction_rate(latest)
+        previous_interaction = _snapshot_interaction_rate(previous)
+        if (
+            latest_interaction is not None
+            and previous_interaction is not None
+            and previous_interaction > 0
+            and (previous_interaction - latest_interaction) / previous_interaction > 0.5
+        ):
+            session.add(
+                Alert(
+                    account_id=account.id,
+                    alert_type="interaction_drop",
+                    severity="critical",
+                    title=f"{account.nickname} 互动率骤降",
+                    message=(
+                        f"互动率由 {previous_interaction:.2%} 降至 {latest_interaction:.2%}，"
+                        "建议排查内容分发和限流信号。"
+                    ),
+                    metric_name="interaction_rate",
+                    current_value=latest_interaction,
+                    threshold_value=previous_interaction * 0.5,
+                )
+            )
 
+    if latest is not None:
+        fans_count = latest.fans_count or 0
+        fans_delta = latest.fans_delta
+        if fans_count > 0 and fans_delta is not None and fans_delta < 0 and abs(fans_delta) / fans_count > 0.01:
+            session.add(
+                Alert(
+                    account_id=account.id,
+                    alert_type="fan_loss",
+                    severity="warning",
+                    title=f"{account.nickname} 粉丝异常流失",
+                    message=f"单日粉丝净流失 {abs(fans_delta)}，超过当前粉丝量 1%。",
+                    metric_name="fans_delta",
+                    current_value=fans_delta,
+                    threshold_value=-(fans_count * 0.01),
+                )
+            )
+        if latest.publish_count is not None and latest.publish_count <= 0:
+            recent_publish = session.scalar(
+                select(AccountDailySnapshot)
+                .where(
+                    AccountDailySnapshot.account_id == account.id,
+                    AccountDailySnapshot.publish_count > 0,
+                )
+                .order_by(AccountDailySnapshot.data_date.desc())
+            )
+            if recent_publish is None or (latest.data_date - recent_publish.data_date).days >= 14:
+                session.add(
+                    Alert(
+                        account_id=account.id,
+                        alert_type="inactive",
+                        severity="warning",
+                        title=f"{account.nickname} 长期未更新",
+                        message="最近 14 天未检测到发布记录，存在停更风险。",
+                        metric_name="publish_count",
+                        current_value=0,
+                        threshold_value=1,
+                    )
+                )
+
+    shadowban_risk = account.shadowban_risk
+    if shadowban_risk is not None and float(shadowban_risk) > 0.3:
+        session.add(
+            Alert(
+                account_id=account.id,
+                alert_type="shadowban_risk",
+                severity="critical",
+                title=f"{account.nickname} 限流风险较高",
+                message=f"限流风险指数为 {float(shadowban_risk):.2f}，建议立即排查。",
+                metric_name="shadowban_risk",
+                current_value=shadowban_risk,
+                threshold_value=0.3,
+            )
+        )
+
+    metric_values = _metric_values(account, score, latest)
+    for rule in session.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))).all():
+        current_value = metric_values.get(rule.metric_name)
+        if current_value is None:
+            continue
+        if _rule_matches(float(current_value), rule.operator, float(rule.threshold_value)):
+            session.add(
+                Alert(
+                    account_id=account.id,
+                    alert_type=rule.alert_type,
+                    severity=rule.severity,
+                    title=f"{account.nickname} 触发告警规则：{rule.name}",
+                    message=(
+                        f"{rule.metric_name} 当前值 {float(current_value):.4f} "
+                        f"{rule.operator} {float(rule.threshold_value):.4f}"
+                    ),
+                    metric_name=rule.metric_name,
+                    current_value=current_value,
+                    threshold_value=rule.threshold_value,
+                )
+            )
+
+
+def _latest_snapshots(
+    session: Session, account_id: int
+) -> tuple[AccountDailySnapshot | None, AccountDailySnapshot | None]:
+    rows = list(
+        session.scalars(
+            select(AccountDailySnapshot)
+            .where(AccountDailySnapshot.account_id == account_id)
+            .order_by(AccountDailySnapshot.data_date.desc())
+            .limit(2)
+        ).all()
+    )
+    latest = rows[0] if rows else None
+    previous = rows[1] if len(rows) > 1 else None
+    return latest, previous
+
+
+def _snapshot_interaction_rate(snapshot: AccountDailySnapshot) -> float | None:
+    reads = snapshot.total_reads
+    if not reads or reads <= 0:
+        return None
+    interactions = sum(
+        value or 0
+        for value in (
+            snapshot.total_likes,
+            snapshot.total_collects,
+            snapshot.total_comments,
+            snapshot.total_shares,
+        )
+    )
+    return interactions / reads
+
+
+def _metric_values(
+    account: Account, score: Score, latest: AccountDailySnapshot | None
+) -> dict[str, float | None]:
+    values: dict[str, float | None] = {
+        "total_score": float(score.total_score),
+        "data_completeness": None if score.data_completeness is None else float(score.data_completeness),
+        "shadowban_risk": None if account.shadowban_risk is None else float(account.shadowban_risk),
+        "ad_compliance_rate": None
+        if account.ad_compliance_rate is None
+        else float(account.ad_compliance_rate),
+        "audit_pass_rate": None if account.audit_pass_rate is None else float(account.audit_pass_rate),
+    }
+    if latest is not None:
+        values.update(
+            {
+                "fans_count": None if latest.fans_count is None else float(latest.fans_count),
+                "fans_delta": None if latest.fans_delta is None else float(latest.fans_delta),
+                "publish_count": None if latest.publish_count is None else float(latest.publish_count),
+                "interaction_rate": _snapshot_interaction_rate(latest),
+            }
+        )
+    return values
+
+
+def _rule_matches(value: float, operator: str, threshold: float) -> bool:
+    if operator == "lt":
+        return value < threshold
+    if operator == "lte":
+        return value <= threshold
+    if operator == "gt":
+        return value > threshold
+    if operator == "gte":
+        return value >= threshold
+    if operator == "eq":
+        return value == threshold
+    return False

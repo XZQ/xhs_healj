@@ -78,6 +78,29 @@ alembic upgrade head
 | `GET` | `/api/v1/scores/{account_id}` | latest score |
 | `GET` | `/api/v1/scores/{account_id}/history` | score history |
 | `GET` | `/api/v1/alerts` | list alerts |
+| `GET` | `/api/v1/alerts/rules` | list custom alert rules |
+| `POST` | `/api/v1/alerts/rules` | create a custom alert rule |
+| `GET` | `/api/v1/groups` | list account groups |
+| `POST` | `/api/v1/groups` | create an account group |
+| `PUT` | `/api/v1/groups/{group_id}/members` | replace group membership |
+| `GET` | `/api/v1/imports/batches` | list import batches |
+| `GET` | `/api/v1/imports/batches/{batch_id}/errors.csv` | download import error rows |
+| `GET` | `/api/v1/data-sources/verifications` | list data source verification records |
+| `POST` | `/api/v1/data-sources/verifications` | register a data source verification record |
+
+## MVP Completion Notes
+
+The app now covers the MVP workflow from the design docs: account management,
+CSV/XLSX import with row-level validation, scoring with confidence and missing-field
+output, score history, built-in alert records, custom alert rules, account groups,
+basic dashboard/detail views, import error downloads, and data-source verification
+tracking before real Pugongying/third-party API integration.
+
+Production-only items such as real platform authorization, external notification
+channels, Airflow, ClickHouse, MinIO, full RBAC, audit review workflows, and managed
+HA deployment are represented by configuration/table/API foundations where possible,
+but still require real infrastructure and third-party credentials before they can be
+operated as a production service.
 
 ## CSV/XLSX Import
 
@@ -187,8 +210,16 @@ python -m pip install -e .
 feishu-upload-doc ".\小红书博主账号健康度评估系统-技术设计方案.md" --title "小红书博主账号健康度评估系统 技术设计方案"
 ```
 
-If the default source upload API is rejected by your app permissions, retry with:
+The default source upload path uses Feishu Drive file upload. If you specifically need
+the media upload API, pass:
 
 ```powershell
-feishu-upload-doc ".\report.md" --source-upload file
+feishu-upload-doc ".\report.md" --source-upload media
+```
+
+Transfer bot-owned imported documents to a user after you get the target `open_id` or
+`user_id`:
+
+```powershell
+python -m xhs_health.tools.feishu_transfer_owner --tokens-file .\.uploads\feishu_doc_tokens.txt --owner-id "ou_xxx"
 ```

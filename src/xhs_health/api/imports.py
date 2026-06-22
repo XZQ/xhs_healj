@@ -1,8 +1,15 @@
 from fastapi import APIRouter, Depends, File, Response, UploadFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
-from xhs_health.schemas import ImportAccountsRequest, ImportAccountsResponse
+from xhs_health.models import ImportBatch, ImportErrorRow
+from xhs_health.schemas import (
+    ImportAccountsRequest,
+    ImportAccountsResponse,
+    ImportBatchOut,
+    ImportErrorRowOut,
+)
 from xhs_health.services.imports import import_accounts, import_flat_file
 
 
@@ -36,3 +43,30 @@ async def import_account_metrics_file(
 def download_import_template() -> Response:
     headers = {"Content-Disposition": 'attachment; filename="xhs_health_import_template.csv"'}
     return Response(content=TEMPLATE_CSV, media_type="text/csv; charset=utf-8", headers=headers)
+
+
+@router.get("/batches", response_model=list[ImportBatchOut])
+def list_import_batches(session: Session = Depends(get_session)) -> list[ImportBatch]:
+    return list(session.scalars(select(ImportBatch).order_by(ImportBatch.created_at.desc())).all())
+
+
+@router.get("/batches/{batch_id}/errors", response_model=list[ImportErrorRowOut])
+def list_import_errors(batch_id: int, session: Session = Depends(get_session)) -> list[ImportErrorRow]:
+    return list(
+        session.scalars(
+            select(ImportErrorRow)
+            .where(ImportErrorRow.batch_id == batch_id)
+            .order_by(ImportErrorRow.row_number.asc(), ImportErrorRow.id.asc())
+        ).all()
+    )
+
+
+@router.get("/batches/{batch_id}/errors.csv")
+def download_import_errors(batch_id: int, session: Session = Depends(get_session)) -> Response:
+    errors = list_import_errors(batch_id, session)
+    rows = ["row_number,field_name,message,raw_payload"]
+    for item in errors:
+        raw_payload = str(item.raw_payload).replace('"', '""')
+        rows.append(f'{item.row_number},{item.field_name},"{item.message}","{raw_payload}"')
+    headers = {"Content-Disposition": f'attachment; filename="import-errors-{batch_id}.csv"'}
+    return Response("\n".join(rows) + "\n", media_type="text/csv; charset=utf-8", headers=headers)
