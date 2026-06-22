@@ -221,7 +221,7 @@ function App() {
   const [statusFilter, setStatusFilter] = React.useState<AccountStatusFilter>("all");
   const [groupFilter, setGroupFilter] = React.useState("all");
   const [page, setPage] = React.useState(1);
-  const [pageSize, setPageSize] = React.useState(20);
+  const [pageSize, setPageSize] = React.useState(10);
   const [total, setTotal] = React.useState(0);
   const previousFiltersRef = React.useRef({ status: statusFilter, group: groupFilter });
   const [newGroupName, setNewGroupName] = React.useState("");
@@ -536,6 +536,30 @@ function App() {
           </nav>
         </div>
 
+        <div>
+          <div className="sidebar-section-label">配置</div>
+          <nav aria-label="配置管理">
+            <a className="nav-item" href="#panel-groups" title="账号分组管理">
+              <Tags size={17} />账号分组
+            </a>
+            <a className="nav-item" href="#panel-rules" title="告警规则管理">
+              <SlidersHorizontal size={17} />告警规则
+            </a>
+            <a className="nav-item" href="#panel-sources" title="数据源验真管理">
+              <Database size={17} />数据源验真
+            </a>
+          </nav>
+        </div>
+
+        <div>
+          <div className="sidebar-section-label">日志</div>
+          <nav aria-label="日志">
+            <a className="nav-item" href="#panel-batches" title="导入批次历史">
+              <FileWarning size={17} />导入批次
+            </a>
+          </nav>
+        </div>
+
         <div className="sidebar-footer">
           <span>{monitoredCount} 个账号在监控</span>
           <span>更新：{new Date().toLocaleDateString("zh-CN")}</span>
@@ -798,7 +822,7 @@ function App() {
         </section>
 
         <section className="ops-grid">
-          <div className="panel">
+          <div className="panel" id="panel-groups">
             <div className="section-heading"><h2><Tags size={16} />账号分组</h2></div>
             <div className="inline-form">
               <input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="新分组名称" />
@@ -815,7 +839,7 @@ function App() {
             </div>
           </div>
 
-          <div className="panel">
+          <div className="panel" id="panel-rules">
             <div className="section-heading"><h2><SlidersHorizontal size={16} />告警规则</h2></div>
             <div className="rule-form">
               <input value={newRule.name} onChange={(event) => setNewRule((current) => ({ ...current, name: event.target.value }))} placeholder="规则名称" />
@@ -841,7 +865,7 @@ function App() {
             </div>
           </div>
 
-          <div className="panel">
+          <div className="panel" id="panel-batches">
             <div className="section-heading"><h2><FileWarning size={16} />导入批次</h2></div>
             <div className="compact-list">
               {importBatches.slice(0, 6).map((batch) => (
@@ -854,7 +878,7 @@ function App() {
             </div>
           </div>
 
-          <div className="panel">
+          <div className="panel" id="panel-sources">
             <div className="section-heading"><h2><Database size={16} />数据源验真</h2></div>
             <div className="inline-form">
               <input value={newSource.source} onChange={(event) => setNewSource((current) => ({ ...current, source: event.target.value }))} placeholder="数据平台" />

@@ -32,7 +32,7 @@ def create_account(payload: AccountCreate, session: Session = Depends(get_sessio
 def list_accounts(
     status: str | None = None,
     group_id: int | None = None,
-    limit: int = 20,
+    limit: int = 10,
     offset: int = 0,
     response: Response = None,
     session: Session = Depends(get_session),
