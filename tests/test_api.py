@@ -487,3 +487,33 @@ def test_accounts_pagination() -> None:
         first_ids = {item["id"] for item in first_body}
         second_ids = {item["id"] for item in second_body}
         assert first_ids.isdisjoint(second_ids)
+
+
+def test_csv_business_rule_violation_recorded_as_error() -> None:
+    """A row that passes _validate_row type checks but fails business rules
+    (e.g. ratio out of [0,1]) must be recorded as an ImportErrorRow and counted
+    in error_rows, not silently dropped."""
+    suffix = uuid4().hex
+    csv_body = (
+        "platform_uid,nickname,data_date,fans_count,ad_compliance_rate\n"
+        f"bad_ratio_{suffix},Bad Ratio,2026-06-19,100,1.5\n"
+        f"good_{suffix},Good Row,2026-06-19,100,0.95\n"
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("bad_ratio.csv", csv_body.encode("utf-8"), "text/csv")},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accounts_upserted"] == 1
+        assert body["error_rows"] == 1
+        assert body["total_rows"] == 2
+
+        errors = client.get(f"/api/v1/imports/batches/{body['import_batch_id']}/errors")
+        assert errors.status_code == 200
+        assert any(
+            err["field_name"] == "ad_compliance_rate" for err in errors.json()
+        ), errors.json()
+

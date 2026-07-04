@@ -125,7 +125,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
     session.flush()
 
     accounts: dict[str, dict] = {}
-    valid_account_keys: list[str] = []
+    account_first_row: dict[str, int] = {}
     for index, row in enumerate(rows, start=2):
         errors = _validate_row(row)
         if errors:
@@ -163,6 +163,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                 "notes": [],
             },
         )
+        account_first_row.setdefault(platform_uid, index)
         if row.get("data_date"):
             account["snapshots"].append(
                 {
@@ -202,17 +203,47 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                     ],
                 }
             )
-        if platform_uid not in valid_account_keys:
-            valid_account_keys.append(platform_uid)
 
-    # total_rows counts input file rows; valid_rows counts successfully parsed accounts.
-    batch.total_rows = len(rows)
-    payload = [AccountImportIn.model_validate(accounts[key]) for key in valid_account_keys]
-    row_level_errors = batch.error_rows
-    result = import_accounts(session, payload)  # batch accounting is done by CSV path itself
+    # Run business-rule validation per aggregated account; record failures with the
+    # original CSV row number of that account's first appearance. This catches
+    # violations (e.g. ratio out of [0,1]) that _validate_row's type checks miss.
+    valid_payloads: list[AccountImportIn] = []
+    account_level_errors = 0
+    for platform_uid, raw in accounts.items():
+        try:
+            payload = AccountImportIn.model_validate(raw)
+        except Exception as exc:
+            account_level_errors += 1
+            session.add(
+                ImportErrorRow(
+                    batch_id=batch.id,
+                    row_number=account_first_row[platform_uid],
+                    field_name="__row__",
+                    message=f"account payload rejected: {exc}",
+                    raw_payload=_jsonable(raw),
+                )
+            )
+            continue
+        rule_errors = validate_import_payload(payload)
+        if rule_errors:
+            account_level_errors += 1
+            for field_name, message in rule_errors:
+                session.add(
+                    ImportErrorRow(
+                        batch_id=batch.id,
+                        row_number=account_first_row[platform_uid],
+                        field_name=field_name,
+                        message=message,
+                        raw_payload=_jsonable(raw),
+                    )
+                )
+            continue
+        valid_payloads.append(payload)
+
+    result = import_accounts(session, valid_payloads)  # no batch: rows already audited above
     batch.valid_rows = result.accounts_upserted
-    batch.error_rows = row_level_errors  # row-level errors from CSV parsing above
-    batch.status = "completed_with_errors" if row_level_errors else "completed"
+    batch.error_rows = batch.error_rows + account_level_errors
+    batch.status = "completed_with_errors" if batch.error_rows else "completed"
     result.import_batch_id = batch.id
     result.total_rows = batch.total_rows
     result.error_rows = batch.error_rows
