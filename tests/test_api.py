@@ -471,7 +471,7 @@ def test_accounts_pagination() -> None:
         imported = client.post("/api/v1/imports/accounts", json={"accounts": accounts_in})
         assert imported.status_code == 200
 
-        first = client.get(f"/api/v1/accounts?status=active&limit=2&offset=0")
+        first = client.get("/api/v1/accounts?status=active&limit=2&offset=0")
         assert first.status_code == 200
         first_body = first.json()
         assert len(first_body) <= 2
@@ -479,7 +479,7 @@ def test_accounts_pagination() -> None:
         total = int(first.headers["x-total-count"])
         assert total >= 3
 
-        second = client.get(f"/api/v1/accounts?status=active&limit=2&offset=2")
+        second = client.get("/api/v1/accounts?status=active&limit=2&offset=2")
         assert second.status_code == 200
         second_body = second.json()
         assert int(second.headers["x-total-count"]) == total

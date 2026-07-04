@@ -1,19 +1,44 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
-from xhs_health.models import Account, AccountGroupMember
+from xhs_health.models import Account, AccountGroupMember, Score
 from xhs_health.schemas import AccountCreate, AccountOut, AccountUpdate
 
 
 router = APIRouter()
 
 
-def _account_out(account: Account) -> AccountOut:
+def _account_out(account: Account, latest_score: Score | None = None) -> AccountOut:
     data = AccountOut.model_validate(account)
     data.group_ids = [item.group_id for item in account.group_links]
+    data.latest_score = latest_score
     return data
+
+
+def _latest_scores_for(session: Session, account_ids: list[int]) -> dict[int, Score]:
+    """One query: pick the latest score per account using a window function."""
+    if not account_ids:
+        return {}
+    sub = (
+        select(
+            Score.id,
+            Score.account_id,
+            func.row_number()
+            .over(
+                partition_by=Score.account_id,
+                order_by=[desc(Score.score_date), desc(Score.created_at)],
+            )
+            .label("rn"),
+        )
+        .where(Score.account_id.in_(account_ids))
+        .subquery()
+    )
+    rows = session.execute(
+        select(Score).join(sub, Score.id == sub.c.id).where(sub.c.rn == 1)
+    ).scalars().all()
+    return {row.account_id: row for row in rows}
 
 
 @router.post("", response_model=AccountOut)
@@ -48,7 +73,8 @@ def list_accounts(
     if response is not None:
         response.headers["X-Total-Count"] = str(total)
     accounts = list(session.scalars(stmt.order_by(Account.id.desc()).limit(limit).offset(offset)).all())
-    return [_account_out(account) for account in accounts]
+    scores = _latest_scores_for(session, [a.id for a in accounts])
+    return [_account_out(account, scores.get(account.id)) for account in accounts]
 
 
 @router.get("/{account_id}", response_model=AccountOut)
@@ -56,7 +82,8 @@ def get_account(account_id: int, session: Session = Depends(get_session)) -> Acc
     account = session.get(Account, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
-    return _account_out(account)
+    scores = _latest_scores_for(session, [account.id])
+    return _account_out(account, scores.get(account.id))
 
 
 @router.put("/{account_id}", response_model=AccountOut)

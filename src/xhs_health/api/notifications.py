@@ -106,6 +106,12 @@ def test_notification_channel(
     payload: NotificationTestRequest,
     session: Session = Depends(get_session),
 ) -> NotificationDelivery:
+    """Test-fire a notification channel.
+
+    STUB: in MVP this only records the delivery row; no real webhook/email/IM
+    transport is wired. Once a transport implementation is added, replace the
+    status logic below with the real send-then-record flow.
+    """
     channel = session.get(NotificationChannel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="notification channel not found")
@@ -119,7 +125,9 @@ def test_notification_channel(
         status = "skipped"
         error_message = "channel target not configured"
     elif not payload.dry_run:
-        status = "queued"
+        # Until a real transport is wired, even non-dry-run requests are recorded as stub.
+        status = "stub"
+        error_message = "real transport not implemented; recorded only"
 
     delivery_payload = {
         "channel": {

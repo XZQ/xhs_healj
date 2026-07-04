@@ -185,6 +185,9 @@ class AlertRule(Base):
     threshold_value: Mapped[float] = mapped_column(Numeric(12, 4))
     severity: Mapped[str] = mapped_column(String(16), default="warning")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # Advisory only: alert generation in MVP deletes + recreates alerts each score run,
+    # so cooldown is not enforced. Kept on the model so future transport-layer dedup
+    # can use it without a schema migration.
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=1440)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

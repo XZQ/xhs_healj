@@ -24,7 +24,16 @@ demo_001,示例美妆博主,美妆护肤,2026-06-19,52000,320,120,180000,8200,51
 def import_account_data(
     payload: ImportAccountsRequest, session: Session = Depends(get_session)
 ) -> ImportAccountsResponse:
-    result = import_accounts(session, payload.accounts)
+    batch = ImportBatch(
+        filename="json_payload.json",
+        total_rows=len(payload.accounts),
+        valid_rows=0,
+        error_rows=0,
+        status="running",
+    )
+    session.add(batch)
+    session.flush()
+    result = import_accounts(session, payload.accounts, batch=batch)
     session.commit()
     return result
 

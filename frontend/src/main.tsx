@@ -26,6 +26,7 @@ type Account = {
   category?: string | null;
   status: string;
   group_ids: number[];
+  latest_score?: Score | null;
 };
 
 type Score = {
@@ -137,7 +138,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getStoredToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${API}${path}`, { ...init, headers });
-  if (response.status === 401) throw new Error("AUTH_REQUIRED");
+  if (response.status === 401) throw new Error("API token 无效或缺失，请在右上角设置");
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<T>;
 }
@@ -147,7 +148,7 @@ async function requestWithMeta<T>(path: string, init?: RequestInit): Promise<{ d
   const token = getStoredToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${API}${path}`, { ...init, headers });
-  if (response.status === 401) throw new Error("AUTH_REQUIRED");
+  if (response.status === 401) throw new Error("API token 无效或缺失，请在右上角设置");
   if (!response.ok) throw new Error(await response.text());
   const raw = response.headers.get("X-Total-Count");
   const total = raw !== null ? Number(raw) : null;
@@ -159,7 +160,7 @@ async function downloadApiFile(path: string, filename: string) {
   const token = getStoredToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${API}${path}`, { headers });
-  if (response.status === 401) throw new Error("AUTH_REQUIRED");
+  if (response.status === 401) throw new Error("API token 无效或缺失，请在右上角设置");
   if (!response.ok) throw new Error(await response.text());
   const blob = await response.blob();
   const url = window.URL.createObjectURL(blob);
@@ -267,15 +268,11 @@ function App() {
         ]);
       const nextAccounts = accountsResult.data;
 
-      const scoreEntries = await Promise.all(
-        nextAccounts.map(async (account) => {
-          try {
-            return [account.id, await request<Score>(`/scores/${account.id}`)] as const;
-          } catch {
-            return [account.id, null] as const;
-          }
-        })
-      );
+      // Build scores map from latest_score returned by /accounts (no N+1).
+      const nextScores: ScoreMap = {};
+      for (const account of nextAccounts) {
+        nextScores[account.id] = account.latest_score ?? null;
+      }
 
       setAccounts(nextAccounts);
       setTotal(accountsResult.total ?? nextAccounts.length);
@@ -285,7 +282,7 @@ function App() {
       setImportBatches(nextBatches);
       setAlertRules(nextRules);
       setSources(nextSources);
-      setScores(Object.fromEntries(scoreEntries));
+      setScores(nextScores);
       if (nextAccounts.length && !nextAccounts.some((account) => account.id === selectedId)) {
         setSelectedId(nextAccounts[0].id);
       }
@@ -440,12 +437,17 @@ function App() {
 
   async function createAlertRule() {
     if (!newRule.name.trim()) return;
+    const slug = newRule.name.trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 32) || "custom_rule";
     await request<AlertRule>("/alerts/rules", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: newRule.name.trim(),
-        alert_type: `custom_${Date.now()}`,
+        alert_type: `custom_${slug}`,
         metric_name: newRule.metric_name,
         operator: newRule.operator,
         threshold_value: newRule.threshold_value,
@@ -661,10 +663,18 @@ function App() {
                 const score = scores[account.id];
                 const names = groups.filter((group) => account.group_ids.includes(group.id)).map((group) => group.name);
                 return (
-                  <button
+                  <div
                     className={`table-row ${selectedAccount?.id === account.id ? "selected" : ""}`}
                     key={account.id}
                     onClick={() => setSelectedId(account.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedId(account.id);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
                     aria-label={`查看 ${account.nickname} 详情`}
                   >
                     <span>
@@ -675,11 +685,11 @@ function App() {
                       </small>
                     </span>
                     <span>
-                      <strong style={{ fontSize: "13px", fontWeight: "600" }}>{account.category || "未分类"}</strong>
+                      <strong className="row-category">{account.category || "未分类"}</strong>
                       <small>{names.join(" / ") || "未分组"}</small>
                     </span>
                     <span className={`score ${scoreTone(score)}`}>{score ? score.total_score.toFixed(1) : "--"}</span>
-                    <span style={{ color: "var(--text-secondary)", fontWeight: 600, fontSize: "13px" }}>
+                    <span className="row-confidence">
                       {score?.confidence_level || "—"}
                     </span>
                     <span className="row-actions">
@@ -709,7 +719,7 @@ function App() {
                         </button>
                       )}
                     </span>
-                  </button>
+                  </div>
                 );
               })}
               {total > 0 && (() => {

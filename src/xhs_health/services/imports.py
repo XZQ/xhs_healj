@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from xhs_health.models import Account, AccountDailySnapshot, ImportBatch, ImportErrorRow, Note, NoteDailyMetric
-from xhs_health.schemas import AccountImportIn, ImportAccountsResponse
+from xhs_health.schemas import AccountImportIn, ImportAccountsResponse, validate_import_payload
 
 
 def _jsonable(value):
@@ -42,32 +42,80 @@ def _cqi(payload: dict) -> float | None:
     return weighted / reads
 
 
-def import_accounts(session: Session, accounts: list[AccountImportIn]) -> ImportAccountsResponse:
+def import_accounts(
+    session: Session,
+    accounts: list[AccountImportIn],
+    batch: ImportBatch | None = None,
+) -> ImportAccountsResponse:
+    """Import JSON-style accounts.
+
+    When `batch` is provided, validation errors are recorded as ImportErrorRow
+    entries and the batch is finalised with status / error counts. This unifies
+    JSON import with the CSV/XLSX path so both share the same audit trail.
+    """
     counts = {
         "accounts_upserted": 0,
         "snapshots_upserted": 0,
         "notes_upserted": 0,
         "note_metrics_upserted": 0,
     }
+    error_rows = 0
 
-    for payload in accounts:
-        account = _upsert_account(session, payload)
-        counts["accounts_upserted"] += 1
+    for index, payload in enumerate(accounts, start=2):
+        errors = validate_import_payload(payload)
+        if errors:
+            error_rows += 1
+            if batch is not None:
+                for field_name, message in errors:
+                    session.add(
+                        ImportErrorRow(
+                            batch_id=batch.id,
+                            row_number=index,
+                            field_name=field_name,
+                            message=message,
+                            raw_payload=_jsonable(payload.model_dump()),
+                        )
+                    )
+            continue
 
-        for snapshot_payload in payload.snapshots:
-            snapshot_data = snapshot_payload.model_dump()
-            _upsert_snapshot(session, account.id, snapshot_data)
-            counts["snapshots_upserted"] += 1
+        try:
+            account = _upsert_account(session, payload)
+            counts["accounts_upserted"] += 1
 
-        for note_payload in payload.notes:
-            note = _upsert_note(session, account.id, note_payload.model_dump(exclude={"metrics"}))
-            counts["notes_upserted"] += 1
-            for metric_payload in note_payload.metrics:
-                metric_data = metric_payload.model_dump()
-                _upsert_note_metric(session, account.id, note.id, note.note_id, metric_data)
-                counts["note_metrics_upserted"] += 1
+            for snapshot_payload in payload.snapshots:
+                snapshot_data = snapshot_payload.model_dump()
+                _upsert_snapshot(session, account.id, snapshot_data)
+                counts["snapshots_upserted"] += 1
 
-    return ImportAccountsResponse(**counts)
+            for note_payload in payload.notes:
+                note = _upsert_note(session, account.id, note_payload.model_dump(exclude={"metrics"}))
+                counts["notes_upserted"] += 1
+                for metric_payload in note_payload.metrics:
+                    metric_data = metric_payload.model_dump()
+                    _upsert_note_metric(session, account.id, note.id, note.note_id, metric_data)
+                    counts["note_metrics_upserted"] += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            error_rows += 1
+            if batch is not None:
+                session.add(
+                    ImportErrorRow(
+                        batch_id=batch.id,
+                        row_number=index,
+                        field_name="__row__",
+                        message=f"unexpected error: {exc}",
+                        raw_payload=_jsonable(payload.model_dump()),
+                    )
+                )
+
+    response = ImportAccountsResponse(**counts)
+    if batch is not None:
+        batch.valid_rows = counts["accounts_upserted"]
+        batch.error_rows = error_rows
+        batch.status = "completed_with_errors" if error_rows else "completed"
+        response.import_batch_id = batch.id
+        response.total_rows = batch.total_rows
+        response.error_rows = error_rows
+    return response
 
 
 def import_flat_file(session: Session, filename: str, content: bytes) -> ImportAccountsResponse:
@@ -77,6 +125,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
     session.flush()
 
     accounts: dict[str, dict] = {}
+    valid_account_keys: list[str] = []
     for index, row in enumerate(rows, start=2):
         errors = _validate_row(row)
         if errors:
@@ -153,13 +202,20 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                     ],
                 }
             )
-        batch.valid_rows += 1
-    payload = [AccountImportIn.model_validate(item) for item in accounts.values()]
-    result = import_accounts(session, payload)
+        if platform_uid not in valid_account_keys:
+            valid_account_keys.append(platform_uid)
+
+    # total_rows counts input file rows; valid_rows counts successfully parsed accounts.
+    batch.total_rows = len(rows)
+    payload = [AccountImportIn.model_validate(accounts[key]) for key in valid_account_keys]
+    row_level_errors = batch.error_rows
+    result = import_accounts(session, payload)  # batch accounting is done by CSV path itself
+    batch.valid_rows = result.accounts_upserted
+    batch.error_rows = row_level_errors  # row-level errors from CSV parsing above
+    batch.status = "completed_with_errors" if row_level_errors else "completed"
     result.import_batch_id = batch.id
     result.total_rows = batch.total_rows
     result.error_rows = batch.error_rows
-    batch.status = "completed_with_errors" if batch.error_rows else "completed"
     return result
 
 

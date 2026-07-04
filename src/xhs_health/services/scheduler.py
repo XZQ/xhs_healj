@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event, Lock, Thread
@@ -9,6 +10,9 @@ from sqlalchemy import select
 from xhs_health.db import SessionLocal
 from xhs_health.models import Account
 from xhs_health.services.score_service import calculate_and_store_score
+
+
+_log = logging.getLogger("xhs_health.scheduler")
 
 
 @dataclass
@@ -108,7 +112,8 @@ class ScoreScheduler:
             for account_id in account_ids:
                 try:
                     calculate_and_store_score(session, account_id)
-                except Exception:
+                except Exception as exc:
+                    _log.warning("scheduler: score failed for account_id=%s: %s", account_id, exc)
                     continue
                 created += 1
             session.commit()

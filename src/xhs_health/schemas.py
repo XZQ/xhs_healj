@@ -26,6 +26,7 @@ class AccountOut(AccountCreate):
     id: int
     status: str
     group_ids: list[int] = Field(default_factory=list)
+    latest_score: "ScoreOut | None" = None
 
 
 class AccountSnapshotIn(BaseModel):
@@ -76,6 +77,38 @@ class AccountImportIn(AccountCreate):
     notes: list[NoteImportIn] = Field(default_factory=list)
 
 
+# Tuple-like alias for (field_name, message) pairs used by import validation.
+ValidationError = tuple[str, str]
+
+
+def _in_range(value: float | None, low: float, high: float) -> bool:
+    return value is None or low <= value <= high
+
+
+def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
+    """Business-rule checks layered on top of pydantic type validation."""
+    errors: list[ValidationError] = []
+    if not (payload.nickname or "").strip():
+        errors.append(("nickname", "nickname is required"))
+    if payload.violation_count_180d is not None and payload.violation_count_180d < 0:
+        errors.append(("violation_count_180d", "must be >= 0"))
+    for field_name in ("ad_compliance_rate", "audit_pass_rate", "shadowban_risk",
+                       "fan_quality_score", "business_stability"):
+        value = getattr(payload, field_name)
+        if not _in_range(value, 0.0, 1.0):
+            errors.append((field_name, f"{field_name} must be between 0 and 1"))
+    if payload.cpe is not None and payload.cpe < 0:
+        errors.append(("cpe", "cpe must be >= 0"))
+    if payload.avg_cpe_benchmark is not None and payload.avg_cpe_benchmark < 0:
+        errors.append(("avg_cpe_benchmark", "must be >= 0"))
+    for snapshot in payload.snapshots:
+        if snapshot.fans_count is not None and snapshot.fans_count < 0:
+            errors.append(("fans_count", "fans_count must be >= 0"))
+        if snapshot.publish_count is not None and snapshot.publish_count < 0:
+            errors.append(("publish_count", "publish_count must be >= 0"))
+    return errors
+
+
 class ImportAccountsRequest(BaseModel):
     accounts: list[AccountImportIn]
 
@@ -118,6 +151,9 @@ class ScoreOut(BaseModel):
     details_json: dict[str, Any]
     missing_fields: list[str]
     warning_flags: list[str]
+
+
+AccountOut.model_rebuild()
 
 
 class AlertOut(BaseModel):

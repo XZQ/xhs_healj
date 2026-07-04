@@ -1,5 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from math import log10
+from os import getenv
 from statistics import mean
 from typing import Any
 
@@ -13,6 +14,72 @@ class ScoreWeights:
     content: float = 0.30
     compliance: float = 0.25
     conversion: float = 0.10
+
+
+@dataclass(frozen=True)
+class ScoreThresholds:
+    """Thresholds used by the rule-based scoring engine.
+
+    Exposed via env vars (e.g. SCORE_GROWTH_HIGH) so tuning doesn't require a code change.
+    """
+
+    # data dimension
+    growth_high: float = 0.05
+    growth_ok: float = 0.02
+    growth_flat_low: float = -0.02
+    interaction_high: float = 0.08
+    interaction_ok: float = 0.05
+    interaction_mid: float = 0.03
+    interaction_low: float = 0.01
+    publish_high: float = 1.0
+    publish_ok: float = 0.5
+    publish_low: float = 0.3
+    fans_loss_penalty_threshold: float = -0.01
+    publish_penalty_threshold: float = 0.1
+
+    # content dimension
+    viral_multiplier: float = 500.0
+    cqi_high: float = 0.08
+    cqi_ok: float = 0.05
+    cqi_mid: float = 0.03
+
+    # compliance dimension
+    shadowban_low: float = 0.1
+    shadowban_mid: float = 0.3
+
+    # confidence levels
+    confidence_high_completeness: float = 0.85
+    confidence_medium_completeness: float = 0.60
+    confidence_max_unknown_for_high: int = 0
+    confidence_max_unknown_for_medium: int = 2
+
+    # health level cut-offs (A/B/C/D/E)
+    level_a: float = 85.0
+    level_b: float = 70.0
+    level_c: float = 55.0
+    level_d: float = 40.0
+
+
+def _load_thresholds_from_env() -> ScoreThresholds:
+    """Read overrides from env vars (SCORE_GROWTH_HIGH, SCORE_INTERACTION_HIGH, ...)."""
+    defaults = ScoreThresholds()
+    overrides: dict[str, Any] = {}
+    for field_name in defaults.__dataclass_fields__:
+        env_key = "SCORE_" + field_name.upper()
+        raw = getenv(env_key)
+        if raw is None or raw == "":
+            continue
+        try:
+            if isinstance(getattr(defaults, field_name), int):
+                overrides[field_name] = int(raw)
+            else:
+                overrides[field_name] = float(raw)
+        except ValueError:
+            continue
+    return ScoreThresholds(**overrides)
+
+
+DEFAULT_THRESHOLDS = _load_thresholds_from_env()
 
 
 @dataclass
@@ -60,21 +127,26 @@ def _bounded(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
-def _score_level(score: float) -> str:
-    if score >= 85:
+def _score_level(score: float, thresholds: ScoreThresholds = DEFAULT_THRESHOLDS) -> str:
+    if score >= thresholds.level_a:
         return "A"
-    if score >= 70:
+    if score >= thresholds.level_b:
         return "B"
-    if score >= 55:
+    if score >= thresholds.level_c:
         return "C"
-    if score >= 40:
+    if score >= thresholds.level_d:
         return "D"
     return "E"
 
 
 class HealthScoreEngine:
-    def __init__(self, weights: ScoreWeights | None = None) -> None:
+    def __init__(
+        self,
+        weights: ScoreWeights | None = None,
+        thresholds: ScoreThresholds | None = None,
+    ) -> None:
         self.weights = weights or ScoreWeights()
+        self.thresholds = thresholds or DEFAULT_THRESHOLDS
 
     def calculate(
         self,
@@ -103,7 +175,7 @@ class HealthScoreEngine:
 
         return HealthScoreResult(
             total_score=round(total_score, 2),
-            health_level=_score_level(total_score),
+            health_level=_score_level(total_score, self.thresholds),
             dimensions=dimensions,
             data_completeness=round(completeness, 4),
             confidence_level=confidence_level,
@@ -148,15 +220,16 @@ class HealthScoreEngine:
 
         previous_fans = (fans - fans_delta) if fans is not None and fans_delta is not None else None
         growth_rate = _ratio(fans_delta, previous_fans)
+        t = self.thresholds
         if growth_rate is None:
             growth_score = None
-        elif growth_rate >= 0.05:
+        elif growth_rate >= t.growth_high:
             growth_score = 100
-        elif growth_rate >= 0.02:
+        elif growth_rate >= t.growth_ok:
             growth_score = 80
         elif growth_rate > 0:
             growth_score = 60
-        elif growth_rate >= -0.02:
+        elif growth_rate >= t.growth_flat_low:
             growth_score = 40
         else:
             growth_score = 20
@@ -164,13 +237,13 @@ class HealthScoreEngine:
         interaction_rate = _ratio(interactions, reads)
         if interaction_rate is None:
             interaction_score = None
-        elif interaction_rate >= 0.08:
+        elif interaction_rate >= t.interaction_high:
             interaction_score = 100
-        elif interaction_rate >= 0.05:
+        elif interaction_rate >= t.interaction_ok:
             interaction_score = 85
-        elif interaction_rate >= 0.03:
+        elif interaction_rate >= t.interaction_mid:
             interaction_score = 70
-        elif interaction_rate >= 0.01:
+        elif interaction_rate >= t.interaction_low:
             interaction_score = 50
         else:
             interaction_score = 30
@@ -178,11 +251,11 @@ class HealthScoreEngine:
         publish_frequency = mean(publish_counts) if publish_counts else None
         if publish_frequency is None:
             publish_score = None
-        elif publish_frequency >= 1.0:
+        elif publish_frequency >= t.publish_high:
             publish_score = 100
-        elif publish_frequency >= 0.5:
+        elif publish_frequency >= t.publish_ok:
             publish_score = 80
-        elif publish_frequency >= 0.3:
+        elif publish_frequency >= t.publish_low:
             publish_score = 60
         else:
             publish_score = 30
@@ -195,10 +268,10 @@ class HealthScoreEngine:
         ]
         score = self._average_known(scores)
         penalty, reasons = 0.0, []
-        if growth_rate is not None and growth_rate < -0.01:
+        if growth_rate is not None and growth_rate < t.fans_loss_penalty_threshold:
             penalty += 10
             reasons.append(f"粉丝持续流失（日增长率 {growth_rate:.2%}）")
-        if publish_frequency is not None and publish_frequency < 0.1:
+        if publish_frequency is not None and publish_frequency < t.publish_penalty_threshold:
             penalty += 10
             reasons.append("发布频率过低，存在停更风险")
 
@@ -235,17 +308,17 @@ class HealthScoreEngine:
             if reads
             else None
         )
-        viral_score = None if viral_rate is None else _bounded(viral_rate * 500)
+        viral_score = None if viral_rate is None else _bounded(viral_rate * self.thresholds.viral_multiplier)
 
         cqi_values = [_to_float(note.get("cqi")) for note in notes if note.get("cqi") is not None]
         avg_cqi = mean(cqi_values) if cqi_values else None
         if avg_cqi is None:
             cqi_score = None
-        elif avg_cqi >= 0.08:
+        elif avg_cqi >= self.thresholds.cqi_high:
             cqi_score = 100
-        elif avg_cqi >= 0.05:
+        elif avg_cqi >= self.thresholds.cqi_ok:
             cqi_score = 80
-        elif avg_cqi >= 0.03:
+        elif avg_cqi >= self.thresholds.cqi_mid:
             cqi_score = 60
         else:
             cqi_score = 40
@@ -306,9 +379,9 @@ class HealthScoreEngine:
         shadowban_risk = _to_float(account_data.get("shadowban_risk"))
         if shadowban_risk is None:
             shadowban_score = None
-        elif shadowban_risk < 0.1:
+        elif shadowban_risk < self.thresholds.shadowban_low:
             shadowban_score = 100
-        elif shadowban_risk < 0.3:
+        elif shadowban_risk < self.thresholds.shadowban_mid:
             shadowban_score = 60
             penalty += 15
             reasons.append("检测到限流风险信号")
@@ -436,10 +509,11 @@ class HealthScoreEngine:
     def _confidence_level(
         self, completeness: float, dimensions: dict[str, DimensionScore]
     ) -> str:
+        t = self.thresholds
         unknown_dimensions = sum(1 for item in dimensions.values() if item.status == "unknown")
-        if completeness >= 0.85 and unknown_dimensions == 0:
+        if completeness >= t.confidence_high_completeness and unknown_dimensions <= t.confidence_max_unknown_for_high:
             return "High"
-        if completeness >= 0.60 and unknown_dimensions <= 2:
+        if completeness >= t.confidence_medium_completeness and unknown_dimensions <= t.confidence_max_unknown_for_medium:
             return "Medium"
         return "Low"
 
