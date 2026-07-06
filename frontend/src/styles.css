@@ -1113,6 +1113,18 @@ nav {
   border-color: var(--warning-bd);
 }
 
+.alert-item.info {
+  color: var(--info-fg);
+  background: var(--info-bg);
+  border-color: var(--info-bd);
+}
+
+.alert-item.critical {
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  border-color: var(--danger-bd);
+}
+
 .alert-item svg {
   flex-shrink: 0;
   margin-top: 1px;
