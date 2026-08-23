@@ -57,7 +57,7 @@ def get_latest_score(account_id: int, session: Session = Depends(get_session)) -
     score = session.scalar(
         select(Score)
         .where(Score.account_id == account_id)
-        .order_by(Score.score_date.desc(), Score.created_at.desc())
+        .order_by(Score.score_date.desc(), Score.created_at.desc(), Score.id.desc())
     )
     if not score:
         raise HTTPException(status_code=404, detail="score not found")
@@ -75,7 +75,7 @@ def get_score_history(
         session.scalars(
             select(Score)
             .where(Score.account_id == account_id)
-            .order_by(Score.score_date.desc(), Score.created_at.desc())
+            .order_by(Score.score_date.desc(), Score.created_at.desc(), Score.id.desc())
             .limit(limit)
         ).all()
     )

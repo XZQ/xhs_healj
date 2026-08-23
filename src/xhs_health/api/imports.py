@@ -48,12 +48,28 @@ def import_account_data(
 async def import_account_metrics_file(
     file: UploadFile = File(...), session: Session = Depends(get_session)
 ) -> ImportAccountsResponse:
-    content = await file.read()
-    if len(content) > MAX_IMPORT_FILE_BYTES:
-        raise HTTPException(
+
+    def _too_large() -> HTTPException:
+        return HTTPException(
             status_code=413,
             detail=f"import file exceeds {MAX_IMPORT_FILE_BYTES // (1024 * 1024)}MB limit",
         )
+
+    # Reject before reading: file.read() loads the whole spooled upload into
+    # memory, so a size check after it would already have paid the RAM cost.
+    if file.size is not None and file.size > MAX_IMPORT_FILE_BYTES:
+        raise _too_large()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_IMPORT_FILE_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    content = b"".join(chunks)
     result = import_flat_file(session, file.filename or "upload.csv", content)
     session.commit()
     return result

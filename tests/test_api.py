@@ -1372,3 +1372,79 @@ def test_audit_logs_pagination_and_filters() -> None:
         other_action = client.get("/api/v1/audit-logs?action=authorization.created")
         assert other_action.status_code == 200
         assert all(item["action"] == "authorization.created" for item in other_action.json())
+
+
+def test_alert_rule_non_finite_threshold_rejected() -> None:
+    """Raw NaN/Infinity tokens in threshold_value must 422, not 500 (NaN breaks
+    the NOT NULL bind) and not store +inf (an `lt Infinity` rule fires forever)."""
+    suffix = uuid4().hex
+    json_headers = {"Content-Type": "application/json"}
+    with TestClient(app) as client:
+        base = (
+            f'{{"name":"pwn_{suffix}","alert_type":"custom_pwn",'
+            f'"metric_name":"total_score","operator":"lt","threshold_value":'
+        )
+        for token in ("NaN", "Infinity", "-Infinity"):
+            response = client.post(
+                "/api/v1/alerts/rules", content=(base + token + "}").encode(), headers=json_headers
+            )
+            assert response.status_code == 422, token
+
+        ok = client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "name": f"finite_{suffix}",
+                "alert_type": "custom_finite",
+                "metric_name": "total_score",
+                "operator": "lt",
+                "threshold_value": 55.0,
+            },
+        )
+        assert ok.status_code == 200
+        rule_id = ok.json()["id"]
+
+        poisoned = client.put(
+            f"/api/v1/alerts/rules/{rule_id}",
+            content=b'{"threshold_value":NaN}',
+            headers=json_headers,
+        )
+        assert poisoned.status_code == 422
+
+
+def test_json_blob_fields_reject_non_finite() -> None:
+    """User JSON blobs land verbatim in JSON columns; a NaN inside distorts on
+    read-back, so scope/config/payload reject non-finite floats anywhere."""
+    suffix = uuid4().hex
+    json_headers = {"Content-Type": "application/json"}
+    with TestClient(app) as client:
+        channel = client.post(
+            "/api/v1/notifications/channels",
+            content=(
+                f'{{"name":"chan_{suffix}","channel_type":"webhook",'
+                f'"target":"https://x","config":{{"weight":NaN}}}}'
+            ).encode(),
+            headers=json_headers,
+        )
+        assert channel.status_code == 422
+
+        account = client.post(
+            "/api/v1/accounts",
+            json={"platform_uid": f"scope_{suffix}", "nickname": "Scope"},
+        ).json()
+        scope = client.post(
+            f"/api/v1/authorizations/accounts/{account['id']}",
+            content=b'{"authorization_type":"oauth","scope":{"metrics":[Infinity]}}',
+            headers=json_headers,
+        )
+        assert scope.status_code == 422
+
+        good_channel = client.post(
+            "/api/v1/notifications/channels",
+            json={"name": f"ok_{suffix}", "channel_type": "webhook", "target": "https://x"},
+        ).json()
+        test_fire = client.post(
+            f"/api/v1/notifications/channels/{good_channel['id']}/test",
+            content=b'{"event_type":"health_alert","payload":{"score":NaN}}',
+            headers=json_headers,
+        )
+        assert test_fire.status_code == 422

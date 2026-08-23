@@ -200,7 +200,9 @@ def _latest_metric_per_note(
             func.row_number()
             .over(
                 partition_by=NoteDailyMetric.note_id,
-                order_by=desc(NoteDailyMetric.data_date),
+                # id tiebreak: same-day metrics from different sources are legal
+                # (the unique key includes data_source); pick the last inserted.
+                order_by=[desc(NoteDailyMetric.data_date), desc(NoteDailyMetric.id)],
             )
             .label("rn"),
         )

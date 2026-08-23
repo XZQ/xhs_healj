@@ -23,7 +23,7 @@ def overview_stats(session: Session = Depends(get_session)) -> OverviewStatsOut:
             func.row_number()
             .over(
                 partition_by=Score.account_id,
-                order_by=[desc(Score.score_date), desc(Score.created_at)],
+                order_by=[desc(Score.score_date), desc(Score.created_at), desc(Score.id)],
             )
             .label("rn"),
         )

@@ -78,12 +78,17 @@ function App() {
   // Alerts are only ever displayed for the selected account, so fetch them
   // scoped server-side; a global top-N fetch could truncate this account's
   // alerts and wrongly show "no alerts".
+  const alertsRequestRef = React.useRef(0);
   async function refreshAlerts(accountId: number | null) {
+    const seq = ++alertsRequestRef.current;
     if (accountId == null) {
       setAlerts([]);
       return;
     }
     const nextAlerts = await request<Alert[]>(`/alerts?account_id=${accountId}&limit=100`);
+    // A slow response for a previously selected account must not clobber the
+    // alerts of the account selected since.
+    if (seq !== alertsRequestRef.current) return;
     setAlerts(nextAlerts);
   }
 
@@ -153,14 +158,21 @@ function App() {
     refreshAlerts(selectedAccount?.id ?? null).catch((error) => setMessage(error.message));
   }, [selectedAccount?.id]);
 
+  const historyRequestRef = React.useRef(0);
   React.useEffect(() => {
+    const seq = ++historyRequestRef.current;
     if (!selectedAccount) {
       setHistory([]);
       return;
     }
     request<Score[]>(`/scores/${selectedAccount.id}/history`)
-      .then((items) => setHistory([...items].reverse().slice(-30)))
-      .catch(() => setHistory([]));
+      .then((items) => {
+        if (seq !== historyRequestRef.current) return;
+        setHistory([...items].reverse().slice(-30));
+      })
+      .catch(() => {
+        if (seq === historyRequestRef.current) setHistory([]);
+      });
   }, [selectedAccount?.id]);
 
   async function triggerScore(accountId: number) {

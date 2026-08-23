@@ -38,7 +38,7 @@ def _latest_scores_by_account(session: Session) -> dict[int, Score]:
             func.row_number()
             .over(
                 partition_by=Score.account_id,
-                order_by=[desc(Score.score_date), desc(Score.created_at)],
+                order_by=[desc(Score.score_date), desc(Score.created_at), desc(Score.id)],
             )
             .label("rn"),
         )
@@ -139,7 +139,7 @@ def export_single_account_report(
     latest_score = session.scalar(
         select(Score)
         .where(Score.account_id == account_id)
-        .order_by(desc(Score.score_date), desc(Score.created_at))
+        .order_by(desc(Score.score_date), desc(Score.created_at), desc(Score.id))
     )
     score_history = list(
         session.scalars(

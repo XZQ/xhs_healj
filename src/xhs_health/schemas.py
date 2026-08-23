@@ -2,7 +2,32 @@ import math
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _require_finite(value: float, field_name: str) -> float:
+    # NaN/Infinity arrive as real floats here: Python's json module parses the
+    # bare NaN/Infinity tokens. NaN cannot bind to a NOT NULL Numeric column
+    # (500) and Infinity silently makes "lt Infinity" rules always fire.
+    if value is not None and not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number")
+    return value
+
+
+def _require_finite_json(value: Any, field_name: str, path: str = "") -> Any:
+    """Recursively reject non-finite floats inside user-supplied JSON blobs
+    (they land verbatim in JSON columns and distort on read-back)."""
+    where = path or field_name
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{where} must be a finite number")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _require_finite_json(item, field_name, f"{where}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _require_finite_json(item, field_name, f"{where}[{index}]")
+    return value
 
 
 class AccountCreate(BaseModel):
@@ -232,6 +257,11 @@ class AlertRuleCreate(BaseModel):
     enabled: bool = True
     cooldown_minutes: int = 1440
 
+    @field_validator("threshold_value")
+    @classmethod
+    def _threshold_finite(cls, value: float) -> float:
+        return _require_finite(value, "threshold_value")
+
 
 class AlertRuleUpdate(BaseModel):
     name: str | None = None
@@ -242,6 +272,11 @@ class AlertRuleUpdate(BaseModel):
     severity: Literal["info", "warning", "critical"] | None = None
     enabled: bool | None = None
     cooldown_minutes: int | None = None
+
+    @field_validator("threshold_value")
+    @classmethod
+    def _threshold_finite(cls, value: float | None) -> float | None:
+        return _require_finite(value, "threshold_value")
 
 
 class AlertRuleOut(AlertRuleCreate):
@@ -306,6 +341,11 @@ class AccountAuthorizationCreate(BaseModel):
     expires_at: datetime | None = None
     proof_url: str | None = None
 
+    @field_validator("scope")
+    @classmethod
+    def _scope_finite(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _require_finite_json(value, "scope")
+
 
 class AccountAuthorizationOut(AccountAuthorizationCreate):
     model_config = ConfigDict(from_attributes=True)
@@ -336,6 +376,11 @@ class NotificationChannelCreate(BaseModel):
     enabled: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("config")
+    @classmethod
+    def _config_finite(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _require_finite_json(value, "config")
+
 
 class NotificationChannelUpdate(BaseModel):
     name: str | None = None
@@ -343,6 +388,13 @@ class NotificationChannelUpdate(BaseModel):
     target: str | None = None
     enabled: bool | None = None
     config: dict[str, Any] | None = None
+
+    @field_validator("config")
+    @classmethod
+    def _config_finite(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return _require_finite_json(value, "config")
 
 
 class NotificationChannelOut(NotificationChannelCreate):
@@ -357,6 +409,11 @@ class NotificationTestRequest(BaseModel):
     event_type: str = "health_alert"
     dry_run: bool = True
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("payload")
+    @classmethod
+    def _payload_finite(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _require_finite_json(value, "payload")
 
 
 class NotificationDeliveryOut(BaseModel):
