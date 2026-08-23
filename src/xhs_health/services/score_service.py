@@ -1,13 +1,18 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.orm import Session
 
 from xhs_health.models import Account, AccountDailySnapshot, Alert, AlertRule, Note, NoteDailyMetric, Score
-from xhs_health.services.scoring import MODEL_VERSION, HealthScoreEngine
+from xhs_health.services.scoring import (
+    DEFAULT_THRESHOLDS,
+    MODEL_VERSION,
+    HealthScoreEngine,
+    ScoreThresholds,
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -27,8 +32,12 @@ def _row_dict(obj: Any, keys: tuple[str, ...]) -> dict[str, Any]:
 
 
 def calculate_and_store_score(
-    session: Session, account_id: int, score_date: date | None = None
+    session: Session,
+    account_id: int,
+    score_date: date | None = None,
+    thresholds: ScoreThresholds | None = None,
 ) -> Score:
+    thresholds = thresholds or DEFAULT_THRESHOLDS
     account = session.get(Account, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
@@ -44,7 +53,10 @@ def calculate_and_store_score(
         raise HTTPException(status_code=400, detail="account has no snapshots")
 
     target_date = score_date or snapshots[-1].data_date
-    notes = _latest_note_metrics(session, account_id)
+    window_start: date | None = None
+    if thresholds.analysis_window_days > 0:
+        window_start = target_date - timedelta(days=thresholds.analysis_window_days - 1)
+    notes = _latest_note_metrics(session, account_id, window_start)
     account_data = _row_dict(
         account,
         (
@@ -77,7 +89,7 @@ def calculate_and_store_score(
         for item in snapshots
     ]
 
-    result = HealthScoreEngine().calculate(account_data, snapshot_data, notes)
+    result = HealthScoreEngine(thresholds=thresholds).calculate(account_data, snapshot_data, notes)
     dims = result.dimensions
     existing = session.scalar(
         select(Score).where(
@@ -111,19 +123,25 @@ def calculate_and_store_score(
         for key, value in score_data.items():
             setattr(score, key, value)
     session.flush()
-    _refresh_score_alerts(session, account, score, result.warning_flags)
+    _refresh_score_alerts(session, account, score, result.warning_flags, thresholds)
     return score
 
 
-def _latest_note_metrics(session: Session, account_id: int) -> list[dict[str, Any]]:
+def _latest_note_metrics(
+    session: Session, account_id: int, window_start: date | None = None
+) -> list[dict[str, Any]]:
     notes = list(session.scalars(select(Note).where(Note.account_id == account_id)).all())
+    latest_by_note = _latest_metric_per_note(session, account_id)
     output = []
     for note in notes:
-        metric = session.scalar(
-            select(NoteDailyMetric)
-            .where(NoteDailyMetric.note_id == note.note_id)
-            .order_by(NoteDailyMetric.data_date.desc())
-        )
+        metric = latest_by_note.get(note.note_id)
+        if metric is not None and window_start is not None and metric.data_date < window_start:
+            # Stale metric: exclude it so historical notes don't feed today's score.
+            metric = None
+        if metric is None and window_start is not None:
+            published = note.publish_time.date() if note.publish_time else None
+            if published is None or published < window_start:
+                continue
         if metric is None:
             output.append(
                 {
@@ -152,10 +170,41 @@ def _latest_note_metrics(session: Session, account_id: int) -> list[dict[str, An
     return output
 
 
+def _latest_metric_per_note(
+    session: Session, account_id: int
+) -> dict[str, NoteDailyMetric]:
+    """One query: pick the latest metric per note using a window function."""
+    sub = (
+        select(
+            NoteDailyMetric.id.label("mid"),
+            func.row_number()
+            .over(
+                partition_by=NoteDailyMetric.note_id,
+                order_by=desc(NoteDailyMetric.data_date),
+            )
+            .label("rn"),
+        )
+        .where(NoteDailyMetric.account_id == account_id)
+        .subquery()
+    )
+    rows = (
+        session.execute(select(NoteDailyMetric).join(sub, NoteDailyMetric.id == sub.c.mid).where(sub.c.rn == 1))
+        .scalars()
+        .all()
+    )
+    return {row.note_id: row for row in rows}
+
+
 def _refresh_score_alerts(
-    session: Session, account: Account, score: Score, warning_flags: list[str]
+    session: Session,
+    account: Account,
+    score: Score,
+    warning_flags: list[str],
+    thresholds: ScoreThresholds | None = None,
 ) -> None:
+    t = thresholds or DEFAULT_THRESHOLDS
     latest, previous = _latest_snapshots(session, account.id)
+    rules = list(session.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))).all())
     generated_types = [
         "low_score",
         "low_confidence",
@@ -164,9 +213,7 @@ def _refresh_score_alerts(
         "inactive",
         "shadowban_risk",
     ]
-    generated_types.extend(
-        session.scalars(select(AlertRule.alert_type).where(AlertRule.enabled.is_(True))).all()
-    )
+    generated_types.extend(rule.alert_type for rule in rules)
     session.execute(
         delete(Alert).where(
             Alert.account_id == account.id,
@@ -174,7 +221,7 @@ def _refresh_score_alerts(
             Alert.is_resolved.is_(False),
         )
     )
-    if float(score.total_score) < 55:
+    if float(score.total_score) < t.alert_low_score:
         session.add(
             Alert(
                 account_id=account.id,
@@ -184,7 +231,7 @@ def _refresh_score_alerts(
                 message=f"当前健康评分为 {float(score.total_score):.2f}，建议尽快排查。",
                 metric_name="total_score",
                 current_value=score.total_score,
-                threshold_value=55,
+                threshold_value=t.alert_low_score,
             )
         )
     if "low_confidence" in warning_flags:
@@ -197,7 +244,7 @@ def _refresh_score_alerts(
                 message="关键数据缺失较多，当前评分不建议用于高风险决策。",
                 metric_name="data_completeness",
                 current_value=score.data_completeness,
-                threshold_value=0.6,
+                threshold_value=t.confidence_medium_completeness,
             )
         )
     if latest is not None and previous is not None:
@@ -207,7 +254,8 @@ def _refresh_score_alerts(
             latest_interaction is not None
             and previous_interaction is not None
             and previous_interaction > 0
-            and (previous_interaction - latest_interaction) / previous_interaction > 0.5
+            and (previous_interaction - latest_interaction) / previous_interaction
+            > t.alert_interaction_drop_ratio
         ):
             session.add(
                 Alert(
@@ -221,14 +269,19 @@ def _refresh_score_alerts(
                     ),
                     metric_name="interaction_rate",
                     current_value=latest_interaction,
-                    threshold_value=previous_interaction * 0.5,
+                    threshold_value=previous_interaction * (1 - t.alert_interaction_drop_ratio),
                 )
             )
 
     if latest is not None:
         fans_count = latest.fans_count or 0
         fans_delta = latest.fans_delta
-        if fans_count > 0 and fans_delta is not None and fans_delta < 0 and abs(fans_delta) / fans_count > 0.01:
+        if (
+            fans_count > 0
+            and fans_delta is not None
+            and fans_delta < 0
+            and abs(fans_delta) / fans_count > t.alert_fan_loss_ratio
+        ):
             session.add(
                 Alert(
                     account_id=account.id,
@@ -238,7 +291,7 @@ def _refresh_score_alerts(
                     message=f"单日粉丝净流失 {abs(fans_delta)}，超过当前粉丝量 1%。",
                     metric_name="fans_delta",
                     current_value=fans_delta,
-                    threshold_value=-(fans_count * 0.01),
+                    threshold_value=-(fans_count * t.alert_fan_loss_ratio),
                 )
             )
         if latest.publish_count is not None and latest.publish_count <= 0:
@@ -250,14 +303,17 @@ def _refresh_score_alerts(
                 )
                 .order_by(AccountDailySnapshot.data_date.desc())
             )
-            if recent_publish is None or (latest.data_date - recent_publish.data_date).days >= 14:
+            if (
+                recent_publish is None
+                or (latest.data_date - recent_publish.data_date).days >= t.alert_inactive_days
+            ):
                 session.add(
                     Alert(
                         account_id=account.id,
                         alert_type="inactive",
                         severity="warning",
                         title=f"{account.nickname} 长期未更新",
-                        message="最近 14 天未检测到发布记录，存在停更风险。",
+                        message=f"最近 {t.alert_inactive_days} 天未检测到发布记录，存在停更风险。",
                         metric_name="publish_count",
                         current_value=0,
                         threshold_value=1,
@@ -265,7 +321,7 @@ def _refresh_score_alerts(
                 )
 
     shadowban_risk = account.shadowban_risk
-    if shadowban_risk is not None and float(shadowban_risk) > 0.3:
+    if shadowban_risk is not None and float(shadowban_risk) > t.alert_shadowban_risk:
         session.add(
             Alert(
                 account_id=account.id,
@@ -275,12 +331,12 @@ def _refresh_score_alerts(
                 message=f"限流风险指数为 {float(shadowban_risk):.2f}，建议立即排查。",
                 metric_name="shadowban_risk",
                 current_value=shadowban_risk,
-                threshold_value=0.3,
+                threshold_value=t.alert_shadowban_risk,
             )
         )
 
     metric_values = _metric_values(account, score, latest)
-    for rule in session.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))).all():
+    for rule in rules:
         current_value = metric_values.get(rule.metric_name)
         if current_value is None:
             continue

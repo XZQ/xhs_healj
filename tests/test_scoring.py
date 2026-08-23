@@ -1,3 +1,5 @@
+import pytest
+
 from xhs_health.services.scoring import HealthScoreEngine, ScoreThresholds
 
 
@@ -263,5 +265,61 @@ def test_confidence_low_when_many_dimensions_unknown() -> None:
         notes=[],
     )
     assert result.confidence_level == "Low"
+
+
+def _snapshot_row(day: str, publish_count: int) -> dict:
+    return {
+        "data_date": day,
+        "fans_count": 10_500,
+        "fans_delta": 100,
+        "total_reads": 100_000,
+        "total_likes": 4_000,
+        "total_collects": 900,
+        "total_comments": 100,
+        "total_shares": 100,
+        "publish_count": publish_count,
+    }
+
+
+def test_viral_rate_unknown_when_notes_lack_read_data() -> None:
+    # Notes exist but read metrics are missing → unknown, not "0% viral".
+    result = HealthScoreEngine().calculate(
+        account_data=_full_account_data(),
+        snapshots=[_snapshot_row("2026-06-19", 1)],
+        notes=[
+            {"note_id": "n1", "read_count": None, "cqi": None,
+             "is_original": True, "tags": ["x"]},
+        ],
+    )
+    indicators = result.dimensions["content"].indicators
+    assert indicators["viral_rate"] is None
+    assert indicators["viral_rate_score"] is None
+
+
+def test_publish_frequency_uses_recent_window() -> None:
+    # 40 daily snapshots: 35 days with 1 post, then 5 idle days.
+    snapshots = [_snapshot_row(f"2026-01-{day:02d}", 1) for day in range(1, 32)]
+    snapshots += [_snapshot_row(f"2026-02-{day:02d}", 1) for day in range(1, 5)]
+    snapshots += [_snapshot_row(f"2026-02-{day:02d}", 0) for day in range(5, 10)]
+
+    result = HealthScoreEngine().calculate(
+        account_data=_full_account_data(), snapshots=snapshots, notes=[]
+    )
+    # Window = 2026-01-11..2026-02-09 → 25 posts / 30 days, not lifetime 35/40.
+    assert result.dimensions["data"].indicators["publish_frequency"] == pytest.approx(25 / 30)
+
+    unlimited = HealthScoreEngine(thresholds=ScoreThresholds(analysis_window_days=0))
+    result = unlimited.calculate(
+        account_data=_full_account_data(), snapshots=snapshots, notes=[]
+    )
+    assert result.dimensions["data"].indicators["publish_frequency"] == pytest.approx(35 / 40)
+
+
+def test_completeness_zero_when_everything_missing() -> None:
+    result = HealthScoreEngine().calculate(
+        account_data={}, snapshots=[{"data_date": "2026-06-19"}], notes=[]
+    )
+    assert result.data_completeness == 0.0
+    assert len(result.missing_fields) == 17
 
 

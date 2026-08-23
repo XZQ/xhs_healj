@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 from math import log10
 from os import getenv
 from statistics import mean
@@ -6,6 +7,34 @@ from typing import Any
 
 
 MODEL_VERSION = "rules_v1"
+
+# Field lists that _missing_fields / _data_completeness must stay in sync with.
+SNAPSHOT_METRIC_FIELDS = (
+    "fans_count",
+    "fans_delta",
+    "total_reads",
+    "total_likes",
+    "total_collects",
+    "total_comments",
+    "total_shares",
+    "publish_count",
+)
+ACCOUNT_PROFILE_FIELDS = (
+    "violation_count_180d",
+    "ad_compliance_rate",
+    "audit_pass_rate",
+    "shadowban_risk",
+    "fan_quality_score",
+    "cpe",
+    "avg_cpe_benchmark",
+    "business_stability",
+)
+SNAPSHOT_INTERACTION_FIELDS = (
+    "total_likes",
+    "total_collects",
+    "total_comments",
+    "total_shares",
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +75,17 @@ class ScoreThresholds:
     # compliance dimension
     shadowban_low: float = 0.1
     shadowban_mid: float = 0.3
+
+    # analysis window: only snapshots/notes within this many days of the latest
+    # data date feed publish frequency and note scoring. <= 0 disables the window.
+    analysis_window_days: int = 30
+
+    # alert thresholds (consumed by the score service alert refresh)
+    alert_low_score: float = 55.0
+    alert_interaction_drop_ratio: float = 0.5
+    alert_fan_loss_ratio: float = 0.01
+    alert_inactive_days: int = 14
+    alert_shadowban_risk: float = 0.3
 
     # confidence levels
     confidence_high_completeness: float = 0.85
@@ -115,6 +155,17 @@ def _to_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _as_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def _ratio(numerator: float | None, denominator: float | None) -> float | None:
@@ -210,10 +261,22 @@ class HealthScoreEngine:
         fans_delta = _to_float(latest.get("fans_delta"))
         reads = _to_float(latest.get("total_reads"))
         interactions = sum(
-            _to_float(latest.get(key)) or 0
-            for key in ("total_likes", "total_collects", "total_comments", "total_shares")
+            _to_float(latest.get(key)) or 0 for key in SNAPSHOT_INTERACTION_FIELDS
         )
-        publish_counts = [_to_float(row.get("publish_count")) for row in snapshots]
+        # Publish frequency must reflect the recent window, not a lifetime average:
+        # an account that posted daily for a year and then stopped still looks
+        # active under a lifetime mean.
+        window_rows = snapshots
+        latest_date = _as_date(latest.get("data_date"))
+        if latest_date is not None and self.thresholds.analysis_window_days > 0:
+            window_start = latest_date - timedelta(days=self.thresholds.analysis_window_days - 1)
+            window_rows = [
+                row
+                for row in snapshots
+                if (row_date := _as_date(row.get("data_date"))) is not None
+                and row_date >= window_start
+            ]
+        publish_counts = [_to_float(row.get("publish_count")) for row in window_rows]
         publish_counts = [value for value in publish_counts if value is not None]
 
         fans_score = _bounded(log10(max(fans or 1, 1)) / log10(1_000_000) * 100)
@@ -303,11 +366,12 @@ class HealthScoreEngine:
 
         reads = [_to_float(note.get("read_count")) or 0 for note in notes]
         avg_reads = mean(reads) if reads else 0
-        viral_rate = (
-            sum(1 for value in reads if avg_reads > 0 and value > avg_reads * 3) / len(reads)
-            if reads
-            else None
-        )
+        # Missing read data is unknown, not "0% viral" — the latter would silently
+        # punish accounts whose notes lack read metrics.
+        if reads and sum(reads) > 0:
+            viral_rate = sum(1 for value in reads if value > avg_reads * 3) / len(reads)
+        else:
+            viral_rate = None
         viral_score = None if viral_rate is None else _bounded(viral_rate * self.thresholds.viral_multiplier)
 
         cqi_values = [_to_float(note.get("cqi")) for note in notes if note.get("cqi") is not None]
@@ -474,28 +538,10 @@ class HealthScoreEngine:
     ) -> list[str]:
         missing: list[str] = []
         latest = sorted(snapshots, key=lambda row: row.get("data_date"))[-1] if snapshots else {}
-        for key in (
-            "fans_count",
-            "fans_delta",
-            "total_reads",
-            "total_likes",
-            "total_collects",
-            "total_comments",
-            "total_shares",
-            "publish_count",
-        ):
+        for key in SNAPSHOT_METRIC_FIELDS:
             if latest.get(key) is None:
                 missing.append(f"snapshot.{key}")
-        for key in (
-            "violation_count_180d",
-            "ad_compliance_rate",
-            "audit_pass_rate",
-            "shadowban_risk",
-            "fan_quality_score",
-            "cpe",
-            "avg_cpe_benchmark",
-            "business_stability",
-        ):
+        for key in ACCOUNT_PROFILE_FIELDS:
             if account_data.get(key) is None:
                 missing.append(f"account.{key}")
         if not notes:
@@ -503,7 +549,7 @@ class HealthScoreEngine:
         return missing
 
     def _data_completeness(self, missing_fields: list[str]) -> float:
-        expected = 17
+        expected = len(SNAPSHOT_METRIC_FIELDS) + len(ACCOUNT_PROFILE_FIELDS) + 1  # + notes
         return max(0.0, (expected - len(set(missing_fields))) / expected)
 
     def _confidence_level(
