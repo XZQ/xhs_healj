@@ -84,6 +84,7 @@ def test_score_uses_decimal_ratio_units() -> None:
 
 # ---------- Boundary / regression tests ----------
 
+
 def _full_account_data() -> dict:
     return {
         "violation_count_180d": 0,
@@ -149,8 +150,13 @@ def test_negative_growth_triggers_penalty_and_warning() -> None:
             }
         ],
         notes=[
-            {"note_id": "n1", "read_count": 20_000, "cqi": 0.08,
-             "is_original": True, "tags": ["x"]},
+            {
+                "note_id": "n1",
+                "read_count": 20_000,
+                "cqi": 0.08,
+                "is_original": True,
+                "tags": ["x"],
+            },
         ],
     )
     assert result.dimensions["data"].penalty > 0
@@ -176,8 +182,13 @@ def test_high_shadowban_risk_caps_compliance_score() -> None:
             }
         ],
         notes=[
-            {"note_id": "n1", "read_count": 20_000, "cqi": 0.08,
-             "is_original": True, "tags": ["x"]},
+            {
+                "note_id": "n1",
+                "read_count": 20_000,
+                "cqi": 0.08,
+                "is_original": True,
+                "tags": ["x"],
+            },
         ],
     )
     assert result.dimensions["compliance"].final_score is not None
@@ -212,8 +223,13 @@ def test_total_score_never_exceeds_100_or_drops_below_0() -> None:
             }
         ],
         notes=[
-            {"note_id": "n1", "read_count": 1_000_000, "cqi": 0.5,
-             "is_original": True, "tags": ["x", "x"]},
+            {
+                "note_id": "n1",
+                "read_count": 1_000_000,
+                "cqi": 0.5,
+                "is_original": True,
+                "tags": ["x", "x"],
+            },
         ],
     )
     assert 0.0 <= result.total_score <= 100.0
@@ -238,8 +254,13 @@ def test_health_level_buckets_use_thresholds() -> None:
             }
         ],
         notes=[
-            {"note_id": "n1", "read_count": 20_000, "cqi": 0.08,
-             "is_original": True, "tags": ["x"]},
+            {
+                "note_id": "n1",
+                "read_count": 20_000,
+                "cqi": 0.08,
+                "is_original": True,
+                "tags": ["x"],
+            },
         ],
     )
     assert result.health_level == "E"
@@ -287,13 +308,33 @@ def test_viral_rate_unknown_when_notes_lack_read_data() -> None:
         account_data=_full_account_data(),
         snapshots=[_snapshot_row("2026-06-19", 1)],
         notes=[
-            {"note_id": "n1", "read_count": None, "cqi": None,
-             "is_original": True, "tags": ["x"]},
+            {"note_id": "n1", "read_count": None, "cqi": None, "is_original": True, "tags": ["x"]},
         ],
     )
     indicators = result.dimensions["content"].indicators
     assert indicators["viral_rate"] is None
     assert indicators["viral_rate_score"] is None
+
+
+def test_viral_rate_ignores_notes_with_missing_read_data() -> None:
+    notes = [{"note_id": "known", "read_count": 100, "is_original": True, "tags": ["x"]}]
+    notes.extend(
+        {
+            "note_id": f"missing-{index}",
+            "read_count": None,
+            "is_original": True,
+            "tags": ["x"],
+        }
+        for index in range(9)
+    )
+    result = HealthScoreEngine().calculate(
+        account_data=_full_account_data(),
+        snapshots=[_snapshot_row("2026-06-19", 1)],
+        notes=notes,
+    )
+    indicators = result.dimensions["content"].indicators
+    assert indicators["viral_rate"] == 0
+    assert indicators["viral_rate_score"] == 0
 
 
 def test_publish_frequency_uses_recent_window() -> None:
@@ -309,9 +350,7 @@ def test_publish_frequency_uses_recent_window() -> None:
     assert result.dimensions["data"].indicators["publish_frequency"] == pytest.approx(25 / 30)
 
     unlimited = HealthScoreEngine(thresholds=ScoreThresholds(analysis_window_days=0))
-    result = unlimited.calculate(
-        account_data=_full_account_data(), snapshots=snapshots, notes=[]
-    )
+    result = unlimited.calculate(account_data=_full_account_data(), snapshots=snapshots, notes=[])
     assert result.dimensions["data"].indicators["publish_frequency"] == pytest.approx(35 / 40)
 
 
@@ -321,5 +360,3 @@ def test_completeness_zero_when_everything_missing() -> None:
     )
     assert result.data_completeness == 0.0
     assert len(result.missing_fields) == 17
-
-

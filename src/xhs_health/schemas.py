@@ -2,7 +2,7 @@ import math
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 def _require_finite(value: float, field_name: str) -> float:
@@ -44,6 +44,13 @@ class AccountUpdate(BaseModel):
     category: str | None = None
     tags: list[str] | None = None
     status: Literal["active", "paused", "archived"] | None = None
+
+    @field_validator("nickname", "tags", "status")
+    @classmethod
+    def _required_fields_not_null(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
 
 
 class AccountOut(AccountCreate):
@@ -114,6 +121,7 @@ def _in_range(value: float | None, low: float, high: float) -> bool:
 # Cumulative counters: negative values are always bad input (fans_delta is NOT
 # here — losing fans is legitimate and must be scored, not rejected).
 SNAPSHOT_COUNTER_FIELDS = (
+    "notes_count",
     "total_reads",
     "total_likes",
     "total_collects",
@@ -136,8 +144,13 @@ def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
         errors.append(("nickname", "nickname is required"))
     if payload.violation_count_180d is not None and payload.violation_count_180d < 0:
         errors.append(("violation_count_180d", "must be >= 0"))
-    for field_name in ("ad_compliance_rate", "audit_pass_rate", "shadowban_risk",
-                       "fan_quality_score", "business_stability"):
+    for field_name in (
+        "ad_compliance_rate",
+        "audit_pass_rate",
+        "shadowban_risk",
+        "fan_quality_score",
+        "business_stability",
+    ):
         value = getattr(payload, field_name)
         if not _in_range(value, 0.0, 1.0):
             errors.append((field_name, f"{field_name} must be between 0 and 1"))
@@ -273,6 +286,21 @@ class AlertRuleUpdate(BaseModel):
     enabled: bool | None = None
     cooldown_minutes: int | None = None
 
+    @field_validator(
+        "name",
+        "alert_type",
+        "metric_name",
+        "operator",
+        "severity",
+        "enabled",
+        "cooldown_minutes",
+    )
+    @classmethod
+    def _required_fields_not_null(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
+
     @field_validator("threshold_value")
     @classmethod
     def _threshold_finite(cls, value: float | None) -> float | None:
@@ -392,6 +420,13 @@ class NotificationChannelUpdate(BaseModel):
     target: str | None = None
     enabled: bool | None = None
     config: dict[str, Any] | None = None
+
+    @field_validator("name", "channel_type", "enabled")
+    @classmethod
+    def _required_fields_not_null(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
 
     @field_validator("config")
     @classmethod

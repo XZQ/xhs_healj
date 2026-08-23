@@ -30,7 +30,17 @@ def batch_trigger_scores(
 ) -> list[Score]:
     account_ids = payload.account_ids
     if account_ids is None:
-        account_ids = list(session.scalars(select(Account.id).where(Account.status == "active")).all())
+        account_ids = list(
+            session.scalars(select(Account.id).where(Account.status == "active")).all()
+        )
+    elif account_ids:
+        requested = set(account_ids)
+        found = set(session.scalars(select(Account.id).where(Account.id.in_(requested))).all())
+        missing = sorted(requested - found)
+        if missing:
+            # Validate before the first per-account commit. Returning a 404 after
+            # earlier scores were persisted makes the failed request non-atomic.
+            raise HTTPException(status_code=404, detail=f"account not found: {missing[0]}")
     scores = []
     for account_id in account_ids:
         try:
@@ -41,8 +51,15 @@ def batch_trigger_scores(
             scores.append(score)
         except HTTPException as exc:
             session.rollback()
-            if exc.status_code != 400:
-                raise
+            # IDs are prevalidated above. A concurrent delete or a no-snapshot
+            # account is an item-level failure and must not turn already committed
+            # results into a request-level error.
+            _log.warning(
+                "batch-trigger: score rejected for account_id=%s: %s",
+                account_id,
+                exc.detail,
+            )
+            continue
         except Exception as exc:
             session.rollback()
             _log.warning("batch-trigger: score failed for account_id=%s: %s", account_id, exc)

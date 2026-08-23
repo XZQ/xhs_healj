@@ -7,7 +7,15 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from xhs_health.models import Account, AccountDailySnapshot, Alert, AlertRule, Note, NoteDailyMetric, Score
+from xhs_health.models import (
+    Account,
+    AccountDailySnapshot,
+    Alert,
+    AlertRule,
+    Note,
+    NoteDailyMetric,
+    Score,
+)
 from xhs_health.services.scoring import (
     DEFAULT_THRESHOLDS,
     MODEL_VERSION,
@@ -43,21 +51,34 @@ def calculate_and_store_score(
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
 
+    latest_data_date = session.scalar(
+        select(func.max(AccountDailySnapshot.data_date)).where(
+            AccountDailySnapshot.account_id == account_id
+        )
+    )
+    if latest_data_date is None:
+        raise HTTPException(status_code=400, detail="account has no snapshots")
+
+    target_date = score_date or latest_data_date
     snapshots = list(
         session.scalars(
             select(AccountDailySnapshot)
-            .where(AccountDailySnapshot.account_id == account_id)
+            .where(
+                AccountDailySnapshot.account_id == account_id,
+                AccountDailySnapshot.data_date <= target_date,
+            )
             .order_by(AccountDailySnapshot.data_date.asc())
         ).all()
     )
     if not snapshots:
-        raise HTTPException(status_code=400, detail="account has no snapshots")
+        raise HTTPException(
+            status_code=400, detail="account has no snapshots on or before score_date"
+        )
 
-    target_date = score_date or snapshots[-1].data_date
     window_start: date | None = None
     if thresholds.analysis_window_days > 0:
         window_start = target_date - timedelta(days=thresholds.analysis_window_days - 1)
-    notes = _latest_note_metrics(session, account_id, window_start)
+    notes = _latest_note_metrics(session, account_id, window_start, target_date)
     account_data = _row_dict(
         account,
         (
@@ -90,7 +111,9 @@ def calculate_and_store_score(
         for item in snapshots
     ]
 
-    result = HealthScoreEngine(thresholds=thresholds).calculate(account_data, snapshot_data, notes)
+    result = HealthScoreEngine(thresholds=thresholds).calculate(
+        account_data, snapshot_data, notes, as_of_date=target_date
+    )
     dims = result.dimensions
     existing = session.scalar(
         select(Score).where(
@@ -143,24 +166,36 @@ def calculate_and_store_score(
         for key, value in score_data.items():
             setattr(score, key, value)
         session.flush()
-    _refresh_score_alerts(session, account, score, result.warning_flags, thresholds)
+    # Backfills must not replace the account's current unresolved alerts with
+    # conditions derived from an older score date.
+    if target_date >= latest_data_date:
+        _refresh_score_alerts(session, account, score, result.warning_flags, thresholds)
     return score
 
 
 def _latest_note_metrics(
-    session: Session, account_id: int, window_start: date | None = None
+    session: Session,
+    account_id: int,
+    window_start: date | None = None,
+    target_date: date | None = None,
 ) -> list[dict[str, Any]]:
     notes = list(session.scalars(select(Note).where(Note.account_id == account_id)).all())
-    latest_by_note = _latest_metric_per_note(session, account_id)
+    latest_by_note = _latest_metric_per_note(session, account_id, target_date)
     output = []
     for note in notes:
+        published = note.publish_time.date() if note.publish_time else None
+        if target_date is not None and published is not None and published > target_date:
+            continue
         metric = latest_by_note.get(note.note_id)
         if metric is not None and window_start is not None and metric.data_date < window_start:
             # Stale metric: exclude it so historical notes don't feed today's score.
             metric = None
         if metric is None and window_start is not None:
-            published = note.publish_time.date() if note.publish_time else None
-            if published is None or published < window_start:
+            if (
+                published is None
+                or published < window_start
+                or (target_date is not None and published > target_date)
+            ):
                 continue
         if metric is None:
             output.append(
@@ -191,26 +226,27 @@ def _latest_note_metrics(
 
 
 def _latest_metric_per_note(
-    session: Session, account_id: int
+    session: Session, account_id: int, target_date: date | None = None
 ) -> dict[str, NoteDailyMetric]:
     """One query: pick the latest metric per note using a window function."""
-    sub = (
-        select(
-            NoteDailyMetric.id.label("mid"),
-            func.row_number()
-            .over(
-                partition_by=NoteDailyMetric.note_id,
-                # id tiebreak: same-day metrics from different sources are legal
-                # (the unique key includes data_source); pick the last inserted.
-                order_by=[desc(NoteDailyMetric.data_date), desc(NoteDailyMetric.id)],
-            )
-            .label("rn"),
+    stmt = select(
+        NoteDailyMetric.id.label("mid"),
+        func.row_number()
+        .over(
+            partition_by=NoteDailyMetric.note_id,
+            # id tiebreak: same-day metrics from different sources are legal
+            # (the unique key includes data_source); pick the last inserted.
+            order_by=[desc(NoteDailyMetric.data_date), desc(NoteDailyMetric.id)],
         )
-        .where(NoteDailyMetric.account_id == account_id)
-        .subquery()
-    )
+        .label("rn"),
+    ).where(NoteDailyMetric.account_id == account_id)
+    if target_date is not None:
+        stmt = stmt.where(NoteDailyMetric.data_date <= target_date)
+    sub = stmt.subquery()
     rows = (
-        session.execute(select(NoteDailyMetric).join(sub, NoteDailyMetric.id == sub.c.mid).where(sub.c.rn == 1))
+        session.execute(
+            select(NoteDailyMetric).join(sub, NoteDailyMetric.id == sub.c.mid).where(sub.c.rn == 1)
+        )
         .scalars()
         .all()
     )
@@ -417,19 +453,25 @@ def _metric_values(
 ) -> dict[str, float | None]:
     values: dict[str, float | None] = {
         "total_score": float(score.total_score),
-        "data_completeness": None if score.data_completeness is None else float(score.data_completeness),
+        "data_completeness": None
+        if score.data_completeness is None
+        else float(score.data_completeness),
         "shadowban_risk": None if account.shadowban_risk is None else float(account.shadowban_risk),
         "ad_compliance_rate": None
         if account.ad_compliance_rate is None
         else float(account.ad_compliance_rate),
-        "audit_pass_rate": None if account.audit_pass_rate is None else float(account.audit_pass_rate),
+        "audit_pass_rate": None
+        if account.audit_pass_rate is None
+        else float(account.audit_pass_rate),
     }
     if latest is not None:
         values.update(
             {
                 "fans_count": None if latest.fans_count is None else float(latest.fans_count),
                 "fans_delta": None if latest.fans_delta is None else float(latest.fans_delta),
-                "publish_count": None if latest.publish_count is None else float(latest.publish_count),
+                "publish_count": None
+                if latest.publish_count is None
+                else float(latest.publish_count),
                 "interaction_rate": _snapshot_interaction_rate(latest),
             }
         )

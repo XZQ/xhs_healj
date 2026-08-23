@@ -204,11 +204,21 @@ class HealthScoreEngine:
         account_data: dict[str, Any],
         snapshots: list[dict[str, Any]],
         notes: list[dict[str, Any]],
+        as_of_date: date | None = None,
     ) -> HealthScoreResult:
-        missing_fields = self._missing_fields(account_data, snapshots, notes)
+        effective_snapshots = snapshots
+        if as_of_date is not None:
+            effective_snapshots = [
+                row
+                for row in snapshots
+                if (row_date := _as_date(row.get("data_date"))) is not None
+                and row_date <= as_of_date
+            ]
+
+        missing_fields = self._missing_fields(account_data, effective_snapshots, notes)
         completeness = self._data_completeness(missing_fields)
 
-        data_dim = self._data_dimension(snapshots)
+        data_dim = self._data_dimension(effective_snapshots, as_of_date)
         content_dim = self._content_dimension(notes)
         compliance_dim = self._compliance_dimension(account_data)
         conversion_dim = self._conversion_dimension(account_data)
@@ -252,7 +262,9 @@ class HealthScoreEngine:
         total_weight = sum(raw_weights[name] for name in available)
         return sum((raw_weights[name] / total_weight) * score for name, score in available.items())
 
-    def _data_dimension(self, snapshots: list[dict[str, Any]]) -> DimensionScore:
+    def _data_dimension(
+        self, snapshots: list[dict[str, Any]], as_of_date: date | None = None
+    ) -> DimensionScore:
         if not snapshots:
             return DimensionScore("数据指标", None, None, status="unknown")
 
@@ -260,21 +272,20 @@ class HealthScoreEngine:
         fans = _to_float(latest.get("fans_count"))
         fans_delta = _to_float(latest.get("fans_delta"))
         reads = _to_float(latest.get("total_reads"))
-        interactions = sum(
-            _to_float(latest.get(key)) or 0 for key in SNAPSHOT_INTERACTION_FIELDS
-        )
+        interactions = sum(_to_float(latest.get(key)) or 0 for key in SNAPSHOT_INTERACTION_FIELDS)
         # Publish frequency must reflect the recent window, not a lifetime average:
         # an account that posted daily for a year and then stopped still looks
         # active under a lifetime mean.
         window_rows = snapshots
         latest_date = _as_date(latest.get("data_date"))
-        if latest_date is not None and self.thresholds.analysis_window_days > 0:
-            window_start = latest_date - timedelta(days=self.thresholds.analysis_window_days - 1)
+        reference_date = as_of_date or latest_date
+        if reference_date is not None and self.thresholds.analysis_window_days > 0:
+            window_start = reference_date - timedelta(days=self.thresholds.analysis_window_days - 1)
             window_rows = [
                 row
                 for row in snapshots
                 if (row_date := _as_date(row.get("data_date"))) is not None
-                and row_date >= window_start
+                and window_start <= row_date <= reference_date
             ]
         publish_counts = [_to_float(row.get("publish_count")) for row in window_rows]
         publish_counts = [value for value in publish_counts if value is not None]
@@ -360,11 +371,19 @@ class HealthScoreEngine:
         if not notes:
             return DimensionScore("内容质量", None, None, status="unknown")
 
-        original_values = [note.get("is_original") for note in notes if note.get("is_original") is not None]
-        original_rate = sum(1 for value in original_values if value) / len(original_values) if original_values else None
+        original_values = [
+            note.get("is_original") for note in notes if note.get("is_original") is not None
+        ]
+        original_rate = (
+            sum(1 for value in original_values if value) / len(original_values)
+            if original_values
+            else None
+        )
         original_score = None if original_rate is None else original_rate * 100
 
-        reads = [_to_float(note.get("read_count")) or 0 for note in notes]
+        reads = [
+            value for note in notes if (value := _to_float(note.get("read_count"))) is not None
+        ]
         avg_reads = mean(reads) if reads else 0
         # Missing read data is unknown, not "0% viral" — the latter would silently
         # punish accounts whose notes lack read metrics.
@@ -372,7 +391,9 @@ class HealthScoreEngine:
             viral_rate = sum(1 for value in reads if value > avg_reads * 3) / len(reads)
         else:
             viral_rate = None
-        viral_score = None if viral_rate is None else _bounded(viral_rate * self.thresholds.viral_multiplier)
+        viral_score = (
+            None if viral_rate is None else _bounded(viral_rate * self.thresholds.viral_multiplier)
+        )
 
         cqi_values = [_to_float(note.get("cqi")) for note in notes if note.get("cqi") is not None]
         avg_cqi = mean(cqi_values) if cqi_values else None
@@ -552,14 +573,18 @@ class HealthScoreEngine:
         expected = len(SNAPSHOT_METRIC_FIELDS) + len(ACCOUNT_PROFILE_FIELDS) + 1  # + notes
         return max(0.0, (expected - len(set(missing_fields))) / expected)
 
-    def _confidence_level(
-        self, completeness: float, dimensions: dict[str, DimensionScore]
-    ) -> str:
+    def _confidence_level(self, completeness: float, dimensions: dict[str, DimensionScore]) -> str:
         t = self.thresholds
         unknown_dimensions = sum(1 for item in dimensions.values() if item.status == "unknown")
-        if completeness >= t.confidence_high_completeness and unknown_dimensions <= t.confidence_max_unknown_for_high:
+        if (
+            completeness >= t.confidence_high_completeness
+            and unknown_dimensions <= t.confidence_max_unknown_for_high
+        ):
             return "High"
-        if completeness >= t.confidence_medium_completeness and unknown_dimensions <= t.confidence_max_unknown_for_medium:
+        if (
+            completeness >= t.confidence_medium_completeness
+            and unknown_dimensions <= t.confidence_max_unknown_for_medium
+        ):
             return "Medium"
         return "Low"
 
@@ -595,4 +620,3 @@ class HealthScoreEngine:
         if conversion.final_score is not None and conversion.final_score < 60:
             suggestions.append("转化能力偏弱，建议校准报价并优化粉丝画像匹配")
         return suggestions
-

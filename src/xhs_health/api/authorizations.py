@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
@@ -14,6 +14,7 @@ from xhs_health.models import (
     AccountGroupMember,
     Alert,
     AuditLog,
+    ImportErrorRow,
     Note,
     NoteDailyMetric,
     Score,
@@ -53,6 +54,25 @@ def _require_account(session: Session, account_id: int) -> Account:
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
     return account
+
+
+def _scrub_import_error_rows(session: Session, platform_uid: str) -> int:
+    """Redact rejected import payloads associated with an account.
+
+    ImportErrorRow predates account linkage, so match its normalized top-level
+    platform_uid using SQLAlchemy's portable JSON expression.
+    """
+    rows = list(
+        session.scalars(
+            select(ImportErrorRow).where(
+                cast(ImportErrorRow.raw_payload["platform_uid"].as_string(), String) == platform_uid
+            )
+        ).all()
+    )
+    for row in rows:
+        row.raw_payload = {}
+        row.message = "redacted by account data action"
+    return len(rows)
 
 
 @router.get("/accounts/{account_id}", response_model=list[AccountAuthorizationOut])
@@ -130,7 +150,9 @@ def export_account_data(account_id: int, session: Session = Depends(get_session)
         ).all()
     )
     notes = list(
-        session.scalars(select(Note).where(Note.account_id == account_id).order_by(Note.id.asc())).all()
+        session.scalars(
+            select(Note).where(Note.account_id == account_id).order_by(Note.id.asc())
+        ).all()
     )
     metrics = list(
         session.scalars(
@@ -176,8 +198,11 @@ def handle_account_data_deletion(
     session: Session = Depends(get_session),
 ) -> AccountDataActionOut:
     account = _require_account(session, account_id)
+    scrubbed_import_errors = _scrub_import_error_rows(session, account.platform_uid)
     if payload.mode == "anonymize":
-        account.platform_uid = f"anonymized_{account.id}_{int(datetime.now(timezone.utc).timestamp())}"
+        account.platform_uid = (
+            f"anonymized_{account.id}_{int(datetime.now(timezone.utc).timestamp())}"
+        )
         account.nickname = "Anonymized Account"
         account.avatar_url = None
         account.category = None
@@ -201,24 +226,34 @@ def handle_account_data_deletion(
             action="account_data.anonymized",
             target_type="account",
             target_id=account_id,
-            detail={"reason": payload.reason},
+            detail={
+                "reason": payload.reason,
+                "scrubbed_import_error_rows": scrubbed_import_errors,
+            },
             actor=payload.actor,
         )
         session.commit()
         return AccountDataActionOut(account_id=account_id, action="anonymize", status="completed")
 
     deletes: dict[str, int] = {}
+    deletes["import_error_rows_scrubbed"] = scrubbed_import_errors
     for name, stmt in [
         ("note_metrics", delete(NoteDailyMetric).where(NoteDailyMetric.account_id == account_id)),
         ("notes", delete(Note).where(Note.account_id == account_id)),
-        ("snapshots", delete(AccountDailySnapshot).where(AccountDailySnapshot.account_id == account_id)),
+        (
+            "snapshots",
+            delete(AccountDailySnapshot).where(AccountDailySnapshot.account_id == account_id),
+        ),
         ("scores", delete(Score).where(Score.account_id == account_id)),
         ("alerts", delete(Alert).where(Alert.account_id == account_id)),
         (
             "authorizations",
             delete(AccountAuthorization).where(AccountAuthorization.account_id == account_id),
         ),
-        ("group_memberships", delete(AccountGroupMember).where(AccountGroupMember.account_id == account_id)),
+        (
+            "group_memberships",
+            delete(AccountGroupMember).where(AccountGroupMember.account_id == account_id),
+        ),
     ]:
         result = session.execute(stmt)
         deletes[name] = int(result.rowcount or 0)

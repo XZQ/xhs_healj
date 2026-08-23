@@ -70,6 +70,8 @@ function App() {
   const [newSource, setNewSource] = React.useState({ source: "", interface_name: "" });
 
   const selectedAccount = accounts.find((account) => account.id === selectedId) ?? accounts[0];
+  const selectedAccountIdRef = React.useRef<number | null>(null);
+  selectedAccountIdRef.current = selectedAccount?.id ?? null;
   const selectedScore = selectedAccount ? scores[selectedAccount.id] : null;
   const selectedAlerts = selectedAccount
     ? alerts.filter((alert) => alert.account_id === selectedAccount.id)
@@ -80,6 +82,10 @@ function App() {
   // alerts and wrongly show "no alerts".
   const alertsRequestRef = React.useRef(0);
   async function refreshAlerts(accountId: number | null) {
+    // Async action handlers capture the selected account from the render that
+    // started them. Do not let a later callback for that stale selection cancel
+    // or overwrite the current account's in-flight request.
+    if (accountId !== selectedAccountIdRef.current) return;
     const seq = ++alertsRequestRef.current;
     if (accountId == null) {
       setAlerts([]);
@@ -88,7 +94,7 @@ function App() {
     const nextAlerts = await request<Alert[]>(`/alerts?account_id=${accountId}&limit=100`);
     // A slow response for a previously selected account must not clobber the
     // alerts of the account selected since.
-    if (seq !== alertsRequestRef.current) return;
+    if (seq !== alertsRequestRef.current || accountId !== selectedAccountIdRef.current) return;
     setAlerts(nextAlerts);
   }
 

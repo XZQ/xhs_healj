@@ -75,7 +75,9 @@ def test_import_and_score_flow() -> None:
 
         accounts = client.get("/api/v1/accounts")
         assert accounts.status_code == 200
-        account_id = next(item["id"] for item in accounts.json() if item["platform_uid"] == platform_uid)
+        account_id = next(
+            item["id"] for item in accounts.json() if item["platform_uid"] == platform_uid
+        )
 
         score = client.post("/api/v1/scores/trigger", json={"account_id": account_id})
         assert score.status_code == 200
@@ -128,9 +130,7 @@ def test_auth_middleware_protects_private_routes() -> None:
         unauthorized = client.get("/api/v1/private")
         assert unauthorized.status_code == 401
         assert unauthorized.headers["www-authenticate"] == "Bearer"
-        authorized = client.get(
-            "/api/v1/private", headers={"Authorization": "Bearer test-token"}
-        )
+        authorized = client.get("/api/v1/private", headers={"Authorization": "Bearer test-token"})
         assert authorized.status_code == 200
 
 
@@ -212,8 +212,13 @@ def test_resolve_alert() -> None:
             for item in client.get("/api/v1/accounts").json()
             if item["platform_uid"] == platform_uid
         )
-        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
-        alert = next(item for item in client.get("/api/v1/alerts").json() if item["account_id"] == account_id)
+        assert (
+            client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code
+            == 200
+        )
+        alert = next(
+            item for item in client.get("/api/v1/alerts").json() if item["account_id"] == account_id
+        )
         resolved = client.put(f"/api/v1/alerts/{alert['id']}/resolve")
         assert resolved.status_code == 200
         assert resolved.json()["is_resolved"] is True
@@ -263,13 +268,17 @@ def test_groups_import_errors_alert_rules_and_sources() -> None:
         assert group.status_code == 200
         group_id = group.json()["id"]
 
-        members = client.put(f"/api/v1/groups/{group_id}/members", json={"account_ids": [account_id]})
+        members = client.put(
+            f"/api/v1/groups/{group_id}/members", json={"account_ids": [account_id]}
+        )
         assert members.status_code == 200
         assert members.json()["account_ids"] == [account_id]
 
         filtered = client.get(f"/api/v1/accounts?group_id={group_id}")
         assert filtered.status_code == 200
-        assert any(item["id"] == account_id and group_id in item["group_ids"] for item in filtered.json())
+        assert any(
+            item["id"] == account_id and group_id in item["group_ids"] for item in filtered.json()
+        )
 
         csv_body = (
             "platform_uid,nickname,data_date,fans_count\n"
@@ -436,7 +445,9 @@ def test_authorization_export_anonymize_and_audit_flow() -> None:
         )
         assert anonymized.status_code == 200
         assert anonymized.json()["action"] == "anonymize"
-        assert client.get(f"/api/v1/accounts/{account_id}").json()["nickname"] == "Anonymized Account"
+        assert (
+            client.get(f"/api/v1/accounts/{account_id}").json()["nickname"] == "Anonymized Account"
+        )
 
         logs = client.get("/api/v1/audit-logs")
         assert logs.status_code == 200
@@ -502,7 +513,10 @@ def test_reports_xlsx_and_single_account_json() -> None:
             for item in client.get("/api/v1/accounts").json()
             if item["platform_uid"] == platform_uid
         )
-        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+        assert (
+            client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code
+            == 200
+        )
 
         xlsx = client.get("/api/v1/reports/accounts.xlsx")
         assert xlsx.status_code == 200
@@ -519,8 +533,7 @@ def test_reports_xlsx_and_single_account_json() -> None:
 def test_accounts_pagination() -> None:
     prefix = f"page_{uuid4().hex}"
     accounts_in = [
-        {"platform_uid": f"{prefix}_{i}", "nickname": f"Page Account {i}"}
-        for i in range(3)
+        {"platform_uid": f"{prefix}_{i}", "nickname": f"Page Account {i}"} for i in range(3)
     ]
 
     with TestClient(app) as client:
@@ -569,10 +582,9 @@ def test_csv_business_rule_violation_recorded_as_error() -> None:
 
         errors = client.get(f"/api/v1/imports/batches/{body['import_batch_id']}/errors")
         assert errors.status_code == 200
-        assert any(
-            err["field_name"] == "ad_compliance_rate" for err in errors.json()
-        ), errors.json()
-
+        assert any(err["field_name"] == "ad_compliance_rate" for err in errors.json()), (
+            errors.json()
+        )
 
 
 def _account_payload(platform_uid: str, note_id: str, note_date: str) -> dict:
@@ -788,15 +800,16 @@ def test_alerts_pagination_and_filters() -> None:
             for item in client.get("/api/v1/accounts").json()
             if item["platform_uid"] == platform_uid
         )
-        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+        assert (
+            client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code
+            == 200
+        )
 
         scoped = client.get(f"/api/v1/alerts?account_id={account_id}")
         total = int(scoped.headers["X-Total-Count"])
         assert total >= 2
 
-        low_confidence = next(
-            a for a in scoped.json() if a["alert_type"] == "low_confidence"
-        )
+        low_confidence = next(a for a in scoped.json() if a["alert_type"] == "low_confidence")
         assert low_confidence["threshold_value"] == 0.6
 
         first = client.get(f"/api/v1/alerts?account_id={account_id}&limit=1")
@@ -812,12 +825,8 @@ def test_alerts_pagination_and_filters() -> None:
         assert all(a["is_resolved"] is False for a in unresolved.json())
         assert len(unresolved.json()) == total
 
-        assert (
-            client.put(f"/api/v1/alerts/{first.json()[0]['id']}/resolve").status_code == 200
-        )
-        after = client.get(
-            f"/api/v1/alerts?account_id={account_id}&unresolved_only=true&limit=500"
-        )
+        assert client.put(f"/api/v1/alerts/{first.json()[0]['id']}/resolve").status_code == 200
+        after = client.get(f"/api/v1/alerts?account_id={account_id}&unresolved_only=true&limit=500")
         assert int(after.headers["X-Total-Count"]) == total - 1
 
 
@@ -826,9 +835,9 @@ def test_negative_counters_rejected() -> None:
     stays signed because losing fans is legitimate."""
     suffix = uuid4().hex
     csv_body = (
-        "platform_uid,nickname,data_date,fans_count,total_reads,note_id,read_count\n"
-        f"neg_{suffix},负数计数,2026-06-19,100,-5,,\n"
-        f"neg_{suffix},负数计数,2026-06-19,100,1000,bad_note_{suffix},-3\n"
+        "platform_uid,nickname,data_date,fans_count,notes_count,total_reads,note_id,read_count\n"
+        f"neg_{suffix},负数计数,2026-06-19,100,-2,-5,,\n"
+        f"neg_{suffix},负数计数,2026-06-19,100,2,1000,bad_note_{suffix},-3\n"
     )
 
     with TestClient(app) as client:
@@ -843,8 +852,78 @@ def test_negative_counters_rejected() -> None:
 
         errors = client.get(f"/api/v1/imports/batches/{body['import_batch_id']}/errors")
         fields = {err["field_name"] for err in errors.json()}
+        assert "notes_count" in fields
         assert "total_reads" in fields
         assert "read_count" in fields
+
+
+def test_backfill_score_excludes_future_snapshots_and_note_metrics() -> None:
+    suffix = uuid4().hex
+    platform_uid = f"backfill_{suffix}"
+    note_id = f"backfill_note_{suffix}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "历史回填",
+                "snapshots": [
+                    {
+                        "data_date": "2026-01-01",
+                        "fans_count": 100,
+                        "fans_delta": 10,
+                        "total_reads": 100,
+                        "total_likes": 20,
+                        "publish_count": 1,
+                    },
+                    {
+                        "data_date": "2026-06-01",
+                        "fans_count": 100,
+                        "fans_delta": -50,
+                        "total_reads": 100,
+                        "total_likes": 0,
+                        "publish_count": 0,
+                    },
+                ],
+                "notes": [
+                    {
+                        "note_id": note_id,
+                        "publish_time": "2026-01-01T10:00:00+08:00",
+                        "metrics": [
+                            {
+                                "data_date": "2026-01-01",
+                                "read_count": 100,
+                                "like_count": 20,
+                            },
+                            {
+                                "data_date": "2026-06-01",
+                                "read_count": 100,
+                                "like_count": 0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=payload).status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts?limit=100").json()
+            if item["platform_uid"] == platform_uid
+        )
+        response = client.post(
+            "/api/v1/scores/trigger",
+            json={"account_id": account_id, "score_date": "2026-01-01"},
+        )
+        assert response.status_code == 200
+        score = response.json()
+        data = score["details_json"]["dimensions"]["data"]["indicators"]
+        content = score["details_json"]["dimensions"]["content"]["indicators"]
+        assert data["fans_growth_rate"] == pytest.approx(10 / 90)
+        assert data["publish_frequency"] == 1
+        assert content["avg_cqi"] == pytest.approx(0.05)
 
 
 def test_overview_uses_latest_score_by_date() -> None:
@@ -933,7 +1012,10 @@ def test_reports_export_latest_score_and_alerts() -> None:
             for item in client.get("/api/v1/accounts").json()
             if item["platform_uid"] == platform_uid
         )
-        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+        assert (
+            client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code
+            == 200
+        )
 
         report = client.get("/api/v1/reports/accounts.csv")
         assert report.status_code == 200
@@ -978,7 +1060,10 @@ def test_score_history_and_import_batches_limit() -> None:
             for item in client.get("/api/v1/accounts").json()
             if item["platform_uid"] == platform_uid
         )
-        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+        assert (
+            client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code
+            == 200
+        )
 
         history = client.get(f"/api/v1/scores/{account_id}/history")
         assert history.status_code == 200
@@ -995,6 +1080,7 @@ def test_score_history_and_import_batches_limit() -> None:
 
 
 # ---------- Adversarial regression tests ----------
+
 
 def test_overflow_and_nan_values_rejected_not_500() -> None:
     """1e999 fans_count raised OverflowError (unhandled 500) and cpe=nan passed
@@ -1024,15 +1110,14 @@ def test_overflow_and_nan_values_rejected_not_500() -> None:
 
 def test_json_nan_cpe_rejected() -> None:
     import json
+
     """Python json accepts NaN tokens, so JSON imports can smuggle NaN past
     pydantic; validate_import_payload must reject it."""
     payload = {
         "platform_uid": f"nan_{uuid4().hex}",
         "nickname": "NaN注入",
         "cpe": None,  # placeholder; swapped to a raw NaN token below
-        "snapshots": [
-            {"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 1}
-        ],
+        "snapshots": [{"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 1}],
     }
 
     with TestClient(app) as client:
@@ -1046,9 +1131,7 @@ def test_json_nan_cpe_rejected() -> None:
         assert imported.status_code == 200
         assert imported.json()["error_rows"] == 1
 
-        errors = client.get(
-            f"/api/v1/imports/batches/{imported.json()['import_batch_id']}/errors"
-        )
+        errors = client.get(f"/api/v1/imports/batches/{imported.json()['import_batch_id']}/errors")
         assert any(err["field_name"] == "cpe" for err in errors.json())
 
 
@@ -1063,9 +1146,7 @@ def test_reimport_preserves_profile_fields() -> None:
                 "nickname": "增量导入",
                 "ad_compliance_rate": 0.95,
                 "shadowban_risk": 0.02,
-                "snapshots": [
-                    {"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 5}
-                ],
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 5}],
             }
         ]
     }
@@ -1074,9 +1155,7 @@ def test_reimport_preserves_profile_fields() -> None:
             {
                 "platform_uid": platform_uid,
                 "nickname": "增量导入",
-                "snapshots": [
-                    {"data_date": "2026-06-20", "fans_count": 150, "fans_delta": 50}
-                ],
+                "snapshots": [{"data_date": "2026-06-20", "fans_count": 150, "fans_delta": 50}],
             }
         ]
     }
@@ -1211,6 +1290,7 @@ def test_anonymize_clears_raw_payload_pii() -> None:
             {
                 "platform_uid": f"anon_{suffix}",
                 "nickname": "PII Nickname",
+                "avatar_url": "https://pii.example/avatar",
                 "snapshots": [{"data_date": "2026-06-19", "fans_count": 1000, "fans_delta": 10}],
                 "notes": [
                     {
@@ -1230,6 +1310,39 @@ def test_anonymize_clears_raw_payload_pii() -> None:
             item["id"] for item in accounts if item["platform_uid"] == f"anon_{suffix}"
         )
 
+        owned_note_id = f"owned_{suffix}"
+        assert (
+            client.post(
+                "/api/v1/imports/accounts",
+                json={
+                    "accounts": [
+                        {
+                            "platform_uid": f"owner_{suffix}",
+                            "nickname": "Other Owner",
+                            "notes": [{"note_id": owned_note_id}],
+                        }
+                    ]
+                },
+            ).status_code
+            == 200
+        )
+        rejected = client.post(
+            "/api/v1/imports/accounts",
+            json={
+                "accounts": [
+                    {
+                        "platform_uid": f"anon_{suffix}",
+                        "nickname": "PII Nickname",
+                        "avatar_url": "https://pii.example/avatar",
+                        "notes": [{"note_id": owned_note_id}],
+                    }
+                ]
+            },
+        ).json()
+        error_path = f"/api/v1/imports/batches/{rejected['import_batch_id']}/errors"
+        before_errors = client.get(error_path).json()
+        assert before_errors[0]["raw_payload"]["platform_uid"] == f"anon_{suffix}"
+
         exported = client.get(f"/api/v1/authorizations/accounts/{account_id}/export").json()
         assert exported["snapshots"][0]["raw_payload"]
         assert exported["note_metrics"][0]["raw_payload"]
@@ -1246,6 +1359,9 @@ def test_anonymize_clears_raw_payload_pii() -> None:
         assert exported["notes"][0]["title"] is None
         assert exported["snapshots"][0]["raw_payload"] == {}
         assert exported["note_metrics"][0]["raw_payload"] == {}
+        after_errors = client.get(error_path).json()
+        assert after_errors[0]["raw_payload"] == {}
+        assert after_errors[0]["message"] == "redacted by account data action"
 
 
 def test_scheduler_survives_poisoned_account(monkeypatch) -> None:
@@ -1342,6 +1458,34 @@ def test_batch_trigger_survives_poisoned_account(monkeypatch) -> None:
         assert client.get(f"/api/v1/scores/{good_id}").status_code == 200
 
 
+def test_batch_trigger_validates_ids_before_any_commit() -> None:
+    suffix = uuid4().hex
+    platform_uid = f"batch_atomic_{suffix}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "Atomic",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=payload).status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts?limit=100").json()
+            if item["platform_uid"] == platform_uid
+        )
+        response = client.post(
+            "/api/v1/scores/batch-trigger",
+            json={"account_ids": [account_id, 2_000_000_000]},
+        )
+        assert response.status_code == 404
+        assert client.get(f"/api/v1/scores/{account_id}").status_code == 404
+
+
 def test_audit_logs_pagination_and_filters() -> None:
     suffix = uuid4().hex
     with TestClient(app) as client:
@@ -1350,10 +1494,13 @@ def test_audit_logs_pagination_and_filters() -> None:
                 "/api/v1/accounts",
                 json={"platform_uid": f"audit_{i}_{suffix}", "nickname": f"Audit {i}"},
             ).json()
-            assert client.post(
-                f"/api/v1/authorizations/accounts/{account['id']}/data-deletion",
-                json={"mode": "anonymize", "actor": "compliance"},
-            ).status_code == 200
+            assert (
+                client.post(
+                    f"/api/v1/authorizations/accounts/{account['id']}/data-deletion",
+                    json={"mode": "anonymize", "actor": "compliance"},
+                ).status_code
+                == 200
+            )
 
         query = "/api/v1/audit-logs?action=account_data.anonymized&target_type=account"
         first = client.get(f"{query}&limit=2")
@@ -1479,9 +1626,25 @@ def test_update_endpoints_reject_null_and_duplicate_name() -> None:
         ).json()
 
         null_threshold = client.put(
-            f"/api/v1/alerts/rules/{second['id']}", content=b'{"threshold_value":null}', headers=json_headers
+            f"/api/v1/alerts/rules/{second['id']}",
+            content=b'{"threshold_value":null}',
+            headers=json_headers,
         )
         assert null_threshold.status_code == 422
+        for field_name in (
+            "name",
+            "alert_type",
+            "metric_name",
+            "operator",
+            "severity",
+            "enabled",
+            "cooldown_minutes",
+        ):
+            response = client.put(
+                f"/api/v1/alerts/rules/{second['id']}",
+                json={field_name: None},
+            )
+            assert response.status_code == 422, field_name
 
         rename_clash = client.put(
             f"/api/v1/alerts/rules/{second['id']}",
@@ -1511,9 +1674,26 @@ def test_update_endpoints_reject_null_and_duplicate_name() -> None:
             headers=json_headers,
         )
         assert null_config.status_code == 422
+        for field_name in ("name", "channel_type", "enabled"):
+            response = client.put(
+                f"/api/v1/notifications/channels/{channel['id']}",
+                json={field_name: None},
+            )
+            assert response.status_code == 422, field_name
         channel_clash = client.put(
             f"/api/v1/notifications/channels/{other_channel['id']}",
             content=f'{{"name":"chan_a_{suffix}"}}'.encode(),
             headers=json_headers,
         )
         assert channel_clash.status_code == 409
+
+        account = client.post(
+            "/api/v1/accounts",
+            json={"platform_uid": f"null_account_{suffix}", "nickname": "Non-null"},
+        ).json()
+        for field_name in ("nickname", "tags", "status"):
+            response = client.put(
+                f"/api/v1/accounts/{account['id']}",
+                json={field_name: None},
+            )
+            assert response.status_code == 422, field_name
