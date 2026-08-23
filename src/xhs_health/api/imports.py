@@ -55,8 +55,15 @@ def download_import_template() -> Response:
 
 
 @router.get("/batches", response_model=list[ImportBatchOut])
-def list_import_batches(session: Session = Depends(get_session)) -> list[ImportBatch]:
-    return list(session.scalars(select(ImportBatch).order_by(ImportBatch.created_at.desc())).all())
+def list_import_batches(
+    limit: int = 50, session: Session = Depends(get_session)
+) -> list[ImportBatch]:
+    limit = max(1, min(limit, 200))
+    return list(
+        session.scalars(
+            select(ImportBatch).order_by(ImportBatch.created_at.desc()).limit(limit)
+        ).all()
+    )
 
 
 @router.get("/batches/{batch_id}/errors", response_model=list[ImportErrorRowOut])

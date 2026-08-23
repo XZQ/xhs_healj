@@ -6,7 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
@@ -16,43 +16,62 @@ from xhs_health.models import Account, AccountDailySnapshot, Alert, Note, NoteDa
 router = APIRouter()
 
 
-def _latest_score_query(account_id: int):
-    return (
-        select(Score)
-        .where(Score.account_id == account_id)
-        .order_by(Score.score_date.desc(), Score.created_at.desc())
+REPORT_COLUMNS = [
+    "account_id",
+    "platform_uid",
+    "nickname",
+    "category",
+    "status",
+    "latest_score",
+    "health_level",
+    "confidence_level",
+    "score_date",
+    "unresolved_alerts",
+]
+
+
+def _latest_scores_by_account(session: Session) -> dict[int, Score]:
+    """Latest score per account by (score_date, created_at) in one query."""
+    sub = (
+        select(
+            Score.id.label("sid"),
+            func.row_number()
+            .over(
+                partition_by=Score.account_id,
+                order_by=[desc(Score.score_date), desc(Score.created_at)],
+            )
+            .label("rn"),
+        )
+        .subquery()
     )
+    rows = (
+        session.execute(select(Score).join(sub, Score.id == sub.c.sid).where(sub.c.rn == 1))
+        .scalars()
+        .all()
+    )
+    return {row.account_id: row for row in rows}
+
+
+def _unresolved_alert_counts(session: Session) -> dict[int, int]:
+    rows = session.execute(
+        select(Alert.account_id, func.count())
+        .where(Alert.is_resolved.is_(False))
+        .group_by(Alert.account_id)
+    ).all()
+    return {account_id: int(count) for account_id, count in rows}
 
 
 @router.get("/accounts.csv")
 def export_accounts_report(session: Session = Depends(get_session)) -> StreamingResponse:
     buffer = StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "account_id",
-            "platform_uid",
-            "nickname",
-            "category",
-            "status",
-            "latest_score",
-            "health_level",
-            "confidence_level",
-            "score_date",
-            "unresolved_alerts",
-        ]
-    )
+    writer.writerow(REPORT_COLUMNS)
     accounts = list(session.scalars(select(Account).order_by(Account.id.asc())).all())
+    latest_scores = _latest_scores_by_account(session)
+    alert_counts = _unresolved_alert_counts(session)
     for account in accounts:
-        latest_score = session.scalar(_latest_score_query(account.id))
-        unresolved_alerts = (
-            session.scalar(
-                select(func.count())
-                .select_from(Alert)
-                .where(Alert.account_id == account.id, Alert.is_resolved.is_(False))
-            )
-            or 0
-        )
+        latest_score = latest_scores.get(account.id)
+        unresolved_alerts = alert_counts.get(account.id, 0)
         writer.writerow(
             [
                 account.id,
@@ -78,30 +97,13 @@ def export_accounts_xlsx_report(session: Session = Depends(get_session)) -> Stre
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "accounts"
-    sheet.append(
-        [
-            "account_id",
-            "platform_uid",
-            "nickname",
-            "category",
-            "status",
-            "latest_score",
-            "health_level",
-            "confidence_level",
-            "score_date",
-            "unresolved_alerts",
-        ]
-    )
-    for account in session.scalars(select(Account).order_by(Account.id.asc())):
-        latest_score = session.scalar(_latest_score_query(account.id))
-        unresolved_alerts = (
-            session.scalar(
-                select(func.count())
-                .select_from(Alert)
-                .where(Alert.account_id == account.id, Alert.is_resolved.is_(False))
-            )
-            or 0
-        )
+    sheet.append(REPORT_COLUMNS)
+    accounts = list(session.scalars(select(Account).order_by(Account.id.asc())).all())
+    latest_scores = _latest_scores_by_account(session)
+    alert_counts = _unresolved_alert_counts(session)
+    for account in accounts:
+        latest_score = latest_scores.get(account.id)
+        unresolved_alerts = alert_counts.get(account.id, 0)
         sheet.append(
             [
                 account.id,
@@ -134,7 +136,11 @@ def export_single_account_report(
     account = session.get(Account, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
-    latest_score = session.scalar(_latest_score_query(account_id))
+    latest_score = session.scalar(
+        select(Score)
+        .where(Score.account_id == account_id)
+        .order_by(desc(Score.score_date), desc(Score.created_at))
+    )
     score_history = list(
         session.scalars(
             select(Score).where(Score.account_id == account_id).order_by(Score.score_date.desc())

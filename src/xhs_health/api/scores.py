@@ -52,9 +52,17 @@ def get_latest_score(account_id: int, session: Session = Depends(get_session)) -
 
 
 @router.get("/{account_id}/history", response_model=list[ScoreOut])
-def get_score_history(account_id: int, session: Session = Depends(get_session)) -> list[Score]:
+def get_score_history(
+    account_id: int,
+    limit: int = 365,
+    session: Session = Depends(get_session),
+) -> list[Score]:
+    limit = max(1, min(limit, 1000))
     return list(
         session.scalars(
-            select(Score).where(Score.account_id == account_id).order_by(Score.score_date.desc())
+            select(Score)
+            .where(Score.account_id == account_id)
+            .order_by(Score.score_date.desc(), Score.created_at.desc())
+            .limit(limit)
         ).all()
     )

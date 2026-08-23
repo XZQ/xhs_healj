@@ -880,3 +880,96 @@ def test_overview_uses_latest_score_by_date() -> None:
         after = client.get("/api/v1/stats/overview").json()
         for key in ("healthy_accounts", "warning_accounts", "risky_accounts"):
             assert after[key] == before[key], key
+
+
+def test_reports_export_latest_score_and_alerts() -> None:
+    platform_uid = f"rpt_{uuid4().hex}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "导出测试账号",
+                "snapshots": [
+                    {
+                        "data_date": "2026-06-19",
+                        "fans_count": 12000,
+                        "fans_delta": 120,
+                        "total_reads": 50000,
+                        "total_likes": 1800,
+                        "total_collects": 900,
+                        "total_comments": 160,
+                        "total_shares": 80,
+                        "publish_count": 1,
+                    }
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json=payload)
+        assert imported.status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts").json()
+            if item["platform_uid"] == platform_uid
+        )
+        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+
+        report = client.get("/api/v1/reports/accounts.csv")
+        assert report.status_code == 200
+        header = report.text.splitlines()[0].split(",")
+        row = next(line for line in report.text.splitlines()[1:] if f",{platform_uid}," in line)
+        values = dict(zip(header, row.split(","), strict=False))
+        assert values["platform_uid"] == platform_uid
+        assert values["latest_score"] != ""
+        assert values["health_level"] != ""
+        assert int(values["unresolved_alerts"]) >= 0
+
+
+def test_score_history_and_import_batches_limit() -> None:
+    platform_uid = f"lim_{uuid4().hex}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "限量测试账号",
+                "snapshots": [
+                    {
+                        "data_date": "2026-06-19",
+                        "fans_count": 12000,
+                        "fans_delta": 120,
+                        "total_reads": 50000,
+                        "total_likes": 1800,
+                        "total_collects": 900,
+                        "total_comments": 160,
+                        "total_shares": 80,
+                        "publish_count": 1,
+                    }
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json=payload)
+        assert imported.status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts").json()
+            if item["platform_uid"] == platform_uid
+        )
+        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+
+        history = client.get(f"/api/v1/scores/{account_id}/history")
+        assert history.status_code == 200
+        assert len(history.json()) == 1
+
+        capped = client.get(f"/api/v1/scores/{account_id}/history?limit=0")
+        assert len(capped.json()) == 1  # clamped to minimum 1, not an error
+
+        batches = client.get("/api/v1/imports/batches?limit=1")
+        assert batches.status_code == 200
+        assert len(batches.json()) == 1
+        newest = batches.json()[0]
+        assert newest["id"] == imported.json()["import_batch_id"]
