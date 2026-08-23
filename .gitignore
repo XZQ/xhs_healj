@@ -20,3 +20,5 @@ frontend/*.tsbuildinfo
 htmlcov/
 .coverage
 .workbuddy/
+.idea/
+artifacts/
