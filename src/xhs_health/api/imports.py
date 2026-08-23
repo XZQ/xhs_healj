@@ -61,7 +61,9 @@ def list_import_batches(
     limit = max(1, min(limit, 200))
     return list(
         session.scalars(
-            select(ImportBatch).order_by(ImportBatch.created_at.desc()).limit(limit)
+            select(ImportBatch)
+            .order_by(ImportBatch.created_at.desc(), ImportBatch.id.desc())
+            .limit(limit)
         ).all()
     )
 

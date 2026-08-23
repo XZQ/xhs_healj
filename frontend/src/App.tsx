@@ -75,6 +75,18 @@ function App() {
     ? alerts.filter((alert) => alert.account_id === selectedAccount.id)
     : alerts;
 
+  // Alerts are only ever displayed for the selected account, so fetch them
+  // scoped server-side; a global top-N fetch could truncate this account's
+  // alerts and wrongly show "no alerts".
+  async function refreshAlerts(accountId: number | null) {
+    if (accountId == null) {
+      setAlerts([]);
+      return;
+    }
+    const nextAlerts = await request<Alert[]>(`/alerts?account_id=${accountId}&limit=100`);
+    setAlerts(nextAlerts);
+  }
+
   async function refresh() {
     setLoading(true);
     try {
@@ -90,11 +102,10 @@ function App() {
       params.set("limit", String(pageSize));
       params.set("offset", String((page - 1) * pageSize));
       const accountPath = `/accounts${params.toString() ? `?${params.toString()}` : ""}`;
-      const [accountsResult, nextGroups, nextAlerts, nextOverview, nextBatches, nextRules, nextSources] =
+      const [accountsResult, nextGroups, nextOverview, nextBatches, nextRules, nextSources] =
         await Promise.all([
           requestWithMeta<Account[]>(accountPath),
           request<AccountGroup[]>("/groups"),
-          request<Alert[]>("/alerts?limit=200"),
           request<OverviewStats>("/stats/overview"),
           request<ImportBatch[]>("/imports/batches"),
           request<AlertRule[]>("/alerts/rules"),
@@ -111,7 +122,6 @@ function App() {
       setAccounts(nextAccounts);
       setTotal(accountsResult.total ?? nextAccounts.length);
       setGroups(nextGroups);
-      setAlerts(nextAlerts);
       setOverview(nextOverview);
       setImportBatches(nextBatches);
       setAlertRules(nextRules);
@@ -131,6 +141,10 @@ function App() {
   }, [statusFilter, groupFilter, page, pageSize]);
 
   React.useEffect(() => {
+    refreshAlerts(selectedAccount?.id ?? null).catch((error) => setMessage(error.message));
+  }, [selectedAccount?.id]);
+
+  React.useEffect(() => {
     if (!selectedAccount) {
       setHistory([]);
       return;
@@ -148,12 +162,10 @@ function App() {
       body: JSON.stringify({ account_id: accountId })
     });
     setScores((current) => ({ ...current, [accountId]: score }));
-    const [nextAlerts, nextOverview] = await Promise.all([
-      request<Alert[]>("/alerts?limit=200"),
-      request<OverviewStats>("/stats/overview")
+    await Promise.all([
+      refreshAlerts(selectedAccount?.id ?? null),
+      request<OverviewStats>("/stats/overview").then(setOverview)
     ]);
-    setAlerts(nextAlerts);
-    setOverview(nextOverview);
   }
 
   async function scoreAllAccounts() {
@@ -169,12 +181,10 @@ function App() {
         ...current,
         ...Object.fromEntries(batch.map((score) => [score.account_id, score]))
       }));
-      const [nextAlerts, nextOverview] = await Promise.all([
-        request<Alert[]>("/alerts?limit=200"),
-        request<OverviewStats>("/stats/overview")
+      await Promise.all([
+        refreshAlerts(selectedAccount?.id ?? null),
+        request<OverviewStats>("/stats/overview").then(setOverview)
       ]);
-      setAlerts(nextAlerts);
-      setOverview(nextOverview);
       setMessage(`已完成 ${batch.length} 个账号评分`);
     } finally {
       setLoading(false);
@@ -183,12 +193,10 @@ function App() {
 
   async function resolveAlert(alertId: number) {
     await request<Alert>(`/alerts/${alertId}/resolve`, { method: "PUT" });
-    const [nextAlerts, nextOverview] = await Promise.all([
-      request<Alert[]>("/alerts?limit=200"),
-      request<OverviewStats>("/stats/overview")
+    await Promise.all([
+      refreshAlerts(selectedAccount?.id ?? null),
+      request<OverviewStats>("/stats/overview").then(setOverview)
     ]);
-    setAlerts(nextAlerts);
-    setOverview(nextOverview);
   }
 
   async function updateAccountStatus(accountId: number, status: "active" | "paused") {
