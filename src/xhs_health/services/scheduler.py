@@ -112,11 +112,14 @@ class ScoreScheduler:
             for account_id in account_ids:
                 try:
                     calculate_and_store_score(session, account_id)
+                    # Commit per account: a poisoned transaction on one account
+                    # must not discard the scores already computed for the rest.
+                    session.commit()
                 except Exception as exc:
+                    session.rollback()
                     _log.warning("scheduler: score failed for account_id=%s: %s", account_id, exc)
                     continue
                 created += 1
-            session.commit()
             return created
 
 

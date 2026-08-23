@@ -36,9 +36,16 @@ def _audit(
 
 
 @router.get("/channels", response_model=list[NotificationChannelOut])
-def list_notification_channels(session: Session = Depends(get_session)) -> list[NotificationChannel]:
+def list_notification_channels(
+    limit: int = 100, session: Session = Depends(get_session)
+) -> list[NotificationChannel]:
+    limit = max(1, min(limit, 500))
     return list(
-        session.scalars(select(NotificationChannel).order_by(NotificationChannel.id.asc())).all()
+        session.scalars(
+            select(NotificationChannel)
+            .order_by(NotificationChannel.created_at.desc(), NotificationChannel.id.desc())
+            .limit(limit)
+        ).all()
     )
 
 
@@ -94,7 +101,7 @@ def list_notification_deliveries(
     return list(
         session.scalars(
             select(NotificationDelivery)
-            .order_by(NotificationDelivery.created_at.desc())
+            .order_by(NotificationDelivery.created_at.desc(), NotificationDelivery.id.desc())
             .limit(limit)
         ).all()
     )

@@ -112,6 +112,15 @@ function App() {
           request<DataSourceVerification[]>("/data-sources/verifications")
         ]);
       const nextAccounts = accountsResult.data;
+      const nextTotal = accountsResult.total ?? nextAccounts.length;
+
+      // Archiving the last row of the last page leaves `page` past the end;
+      // jump back to the real last page instead of showing an empty table.
+      const maxPage = Math.max(1, Math.ceil(nextTotal / pageSize));
+      if (!nextAccounts.length && nextTotal > 0 && page > maxPage) {
+        setPage(maxPage);
+        return;
+      }
 
       // Build scores map from latest_score returned by /accounts (no N+1).
       const nextScores: ScoreMap = {};
@@ -120,7 +129,7 @@ function App() {
       }
 
       setAccounts(nextAccounts);
-      setTotal(accountsResult.total ?? nextAccounts.length);
+      setTotal(nextTotal);
       setGroups(nextGroups);
       setOverview(nextOverview);
       setImportBatches(nextBatches);

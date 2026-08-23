@@ -57,14 +57,16 @@ def _require_account(session: Session, account_id: int) -> Account:
 
 @router.get("/accounts/{account_id}", response_model=list[AccountAuthorizationOut])
 def list_account_authorizations(
-    account_id: int, session: Session = Depends(get_session)
+    account_id: int, limit: int = 100, session: Session = Depends(get_session)
 ) -> list[AccountAuthorization]:
     _require_account(session, account_id)
+    limit = max(1, min(limit, 500))
     return list(
         session.scalars(
             select(AccountAuthorization)
             .where(AccountAuthorization.account_id == account_id)
-            .order_by(AccountAuthorization.created_at.desc())
+            .order_by(AccountAuthorization.created_at.desc(), AccountAuthorization.id.desc())
+            .limit(limit)
         ).all()
     )
 
@@ -184,6 +186,16 @@ def handle_account_data_deletion(
         for note in session.scalars(select(Note).where(Note.account_id == account_id)):
             note.title = None
             note.tags = []
+        # raw_payload stores the unmodified imported row — it can embed PII the
+        # structured columns no longer carry, so an anonymize must purge it too.
+        for snapshot in session.scalars(
+            select(AccountDailySnapshot).where(AccountDailySnapshot.account_id == account_id)
+        ):
+            snapshot.raw_payload = {}
+        for metric in session.scalars(
+            select(NoteDailyMetric).where(NoteDailyMetric.account_id == account_id)
+        ):
+            metric.raw_payload = {}
         _audit(
             session,
             action="account_data.anonymized",

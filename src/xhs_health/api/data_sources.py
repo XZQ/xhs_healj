@@ -12,11 +12,14 @@ router = APIRouter()
 
 @router.get("/verifications", response_model=list[DataSourceVerificationOut])
 def list_data_source_verifications(
-    session: Session = Depends(get_session),
+    limit: int = 100, session: Session = Depends(get_session)
 ) -> list[DataSourceVerification]:
+    limit = max(1, min(limit, 500))
     return list(
         session.scalars(
-            select(DataSourceVerification).order_by(DataSourceVerification.created_at.desc())
+            select(DataSourceVerification)
+            .order_by(DataSourceVerification.created_at.desc(), DataSourceVerification.id.desc())
+            .limit(limit)
         ).all()
     )
 

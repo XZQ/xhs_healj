@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -6,6 +8,9 @@ from xhs_health.db import get_session
 from xhs_health.models import Account, Score
 from xhs_health.schemas import BatchTriggerScoreRequest, ScoreOut, TriggerScoreRequest
 from xhs_health.services.score_service import calculate_and_store_score
+
+
+_log = logging.getLogger("xhs_health.scores")
 
 
 router = APIRouter()
@@ -29,11 +34,19 @@ def batch_trigger_scores(
     scores = []
     for account_id in account_ids:
         try:
-            scores.append(calculate_and_store_score(session, account_id, payload.score_date))
+            score = calculate_and_store_score(session, account_id, payload.score_date)
+            # Commit per account so one account's failure cannot discard the
+            # scores already computed for the rest of the batch.
+            session.commit()
+            scores.append(score)
         except HTTPException as exc:
+            session.rollback()
             if exc.status_code != 400:
                 raise
-    session.commit()
+        except Exception as exc:
+            session.rollback()
+            _log.warning("batch-trigger: score failed for account_id=%s: %s", account_id, exc)
+            continue
     for score in scores:
         session.refresh(score)
     return scores

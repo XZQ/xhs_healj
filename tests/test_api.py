@@ -2,6 +2,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from xhs_health.auth import build_auth_middleware
 from xhs_health.config import _positive_int_env
@@ -321,6 +322,10 @@ def test_groups_import_errors_alert_rules_and_sources() -> None:
         assert listed_sources.status_code == 200
         assert any(item["source"] == f"pgy_{suffix}" for item in listed_sources.json())
 
+        sources_limited = client.get("/api/v1/data-sources/verifications?limit=1")
+        assert sources_limited.status_code == 200
+        assert len(sources_limited.json()) == 1
+
 
 def test_builtin_alerts_cover_mvp_conditions() -> None:
     platform_uid = f"alert_rules_{uuid4().hex}"
@@ -404,6 +409,16 @@ def test_authorization_export_anonymize_and_audit_flow() -> None:
         assert authorization.status_code == 200
         authorization_id = authorization.json()["id"]
 
+        second = client.post(
+            f"/api/v1/authorizations/accounts/{account_id}",
+            json={"authorization_type": "manual", "authorized_by": "tester2"},
+        )
+        assert second.status_code == 200
+        limited = client.get(f"/api/v1/authorizations/accounts/{account_id}?limit=1")
+        assert limited.status_code == 200
+        assert len(limited.json()) == 1
+        assert limited.json()[0]["id"] == second.json()["id"]
+
         exported = client.get(f"/api/v1/authorizations/accounts/{account_id}/export")
         assert exported.status_code == 200
         exported_body = exported.json()
@@ -458,6 +473,10 @@ def test_notification_channel_test_delivery() -> None:
         deliveries = client.get("/api/v1/notifications/deliveries")
         assert deliveries.status_code == 200
         assert any(item["id"] == delivery.json()["id"] for item in deliveries.json())
+
+        channels_limited = client.get("/api/v1/notifications/channels?limit=1")
+        assert channels_limited.status_code == 200
+        assert len(channels_limited.json()) == 1
 
 
 def test_reports_xlsx_and_single_account_json() -> None:
@@ -1180,3 +1199,176 @@ def test_errors_csv_survives_hostile_text() -> None:
         assert data_rows, "error rows must be present"
         for row in data_rows:
             assert len(row) == 4, f"corrupted row: {row!r}"
+
+
+def test_anonymize_clears_raw_payload_pii() -> None:
+    """Anonymize must purge raw_payload blobs: they hold the unmodified imported
+    row and can embed PII (nicknames, titles, tags) the structured columns no
+    longer carry."""
+    suffix = uuid4().hex
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": f"anon_{suffix}",
+                "nickname": "PII Nickname",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 1000, "fans_delta": 10}],
+                "notes": [
+                    {
+                        "note_id": f"note_{suffix}",
+                        "title": "包含昵称的标题",
+                        "metrics": [{"data_date": "2026-06-19", "read_count": 500}],
+                    }
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=payload).status_code == 200
+        accounts = client.get("/api/v1/accounts?limit=100").json()
+        account_id = next(
+            item["id"] for item in accounts if item["platform_uid"] == f"anon_{suffix}"
+        )
+
+        exported = client.get(f"/api/v1/authorizations/accounts/{account_id}/export").json()
+        assert exported["snapshots"][0]["raw_payload"]
+        assert exported["note_metrics"][0]["raw_payload"]
+        assert exported["notes"][0]["title"] == "包含昵称的标题"
+
+        anonymized = client.post(
+            f"/api/v1/authorizations/accounts/{account_id}/data-deletion",
+            json={"mode": "anonymize", "actor": "compliance", "reason": "user request"},
+        )
+        assert anonymized.status_code == 200
+
+        exported = client.get(f"/api/v1/authorizations/accounts/{account_id}/export").json()
+        assert exported["account"]["nickname"] == "Anonymized Account"
+        assert exported["notes"][0]["title"] is None
+        assert exported["snapshots"][0]["raw_payload"] == {}
+        assert exported["note_metrics"][0]["raw_payload"] == {}
+
+
+def test_scheduler_survives_poisoned_account(monkeypatch) -> None:
+    """A session-poisoning failure on one account must not discard scores already
+    computed for later accounts nor mark the whole run failed."""
+    from xhs_health.services import scheduler as scheduler_module
+    from xhs_health.services.score_service import (
+        calculate_and_store_score as real_calculate,
+    )
+
+    suffix = uuid4().hex
+    # bad first: it poisons the transaction, so the good account is scored only
+    # if the scheduler rolls back and continues per account.
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": f"sched_bad_{suffix}",
+                "nickname": "Poisoned",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            },
+            {
+                "platform_uid": f"sched_good_{suffix}",
+                "nickname": "Healthy",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            },
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=payload).status_code == 200
+        accounts = client.get("/api/v1/accounts?limit=100").json()
+        id_by_uid = {item["platform_uid"]: item["id"] for item in accounts}
+        bad_id = id_by_uid[f"sched_bad_{suffix}"]
+        good_id = id_by_uid[f"sched_good_{suffix}"]
+
+        def poisoned(session, account_id, score_date=None):
+            if account_id == bad_id:
+                session.execute(text("SELECT * FROM nonexistent_table"))
+            return real_calculate(session, account_id, score_date)
+
+        monkeypatch.setattr(scheduler_module, "calculate_and_store_score", poisoned)
+        snapshot = scheduler_module.score_scheduler.run_once()
+        monkeypatch.undo()
+
+        assert snapshot.last_status == "success"
+        assert snapshot.scores_created >= 1
+        assert client.get(f"/api/v1/scores/{good_id}").status_code == 200
+
+
+def test_batch_trigger_survives_poisoned_account(monkeypatch) -> None:
+    """An unexpected exception on one account must not 500 the whole batch or
+    discard the scores already computed for the rest."""
+    from xhs_health.api import scores as scores_module
+    from xhs_health.services.score_service import (
+        calculate_and_store_score as real_calculate,
+    )
+
+    suffix = uuid4().hex
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": f"batch_bad_{suffix}",
+                "nickname": "Poisoned",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            },
+            {
+                "platform_uid": f"batch_good_{suffix}",
+                "nickname": "Healthy",
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            },
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=payload).status_code == 200
+        accounts = client.get("/api/v1/accounts?limit=100").json()
+        id_by_uid = {item["platform_uid"]: item["id"] for item in accounts}
+        bad_id = id_by_uid[f"batch_bad_{suffix}"]
+        good_id = id_by_uid[f"batch_good_{suffix}"]
+
+        def poisoned(session, account_id, score_date=None):
+            if account_id == bad_id:
+                session.execute(text("SELECT * FROM nonexistent_table"))
+            return real_calculate(session, account_id, score_date)
+
+        monkeypatch.setattr(scores_module, "calculate_and_store_score", poisoned)
+        result = client.post(
+            "/api/v1/scores/batch-trigger", json={"account_ids": [bad_id, good_id]}
+        )
+        monkeypatch.undo()
+
+        assert result.status_code == 200
+        assert [item["account_id"] for item in result.json()] == [good_id]
+        assert client.get(f"/api/v1/scores/{good_id}").status_code == 200
+
+
+def test_audit_logs_pagination_and_filters() -> None:
+    suffix = uuid4().hex
+    with TestClient(app) as client:
+        for i in range(3):
+            account = client.post(
+                "/api/v1/accounts",
+                json={"platform_uid": f"audit_{i}_{suffix}", "nickname": f"Audit {i}"},
+            ).json()
+            assert client.post(
+                f"/api/v1/authorizations/accounts/{account['id']}/data-deletion",
+                json={"mode": "anonymize", "actor": "compliance"},
+            ).status_code == 200
+
+        query = "/api/v1/audit-logs?action=account_data.anonymized&target_type=account"
+        first = client.get(f"{query}&limit=2")
+        assert first.status_code == 200
+        assert len(first.json()) == 2
+        assert int(first.headers["X-Total-Count"]) >= 3
+
+        second = client.get(f"{query}&limit=2&offset=2")
+        assert second.status_code == 200
+        assert len(second.json()) >= 1
+
+        ids = [item["id"] for item in first.json() + second.json()]
+        assert ids == sorted(ids, reverse=True)
+        assert len(set(ids)) == len(ids)
+
+        other_action = client.get("/api/v1/audit-logs?action=authorization.created")
+        assert other_action.status_code == 200
+        assert all(item["action"] == "authorization.created" for item in other_action.json())
