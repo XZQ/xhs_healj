@@ -20,6 +20,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://xhs:xhs_pass@postgres:5432/xhs_health
       API_PREFIX: /api/v1
+      # Local-development default. Override APP_API_TOKEN outside local Compose.
+      APP_API_TOKEN: ${APP_API_TOKEN:-xhs-local-dev-token}
     ports:
       - "8000:8000"
     depends_on:
