@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, File, Response, UploadFile
+import csv
+from io import StringIO
+
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,6 +17,9 @@ from xhs_health.services.imports import import_accounts, import_flat_file
 
 
 router = APIRouter()
+
+# Import files are plain text/sheets; anything larger is abuse or a mistake.
+MAX_IMPORT_FILE_BYTES = 20 * 1024 * 1024
 
 TEMPLATE_CSV = """platform_uid,nickname,category,data_date,fans_count,fans_delta,notes_count,total_reads,total_likes,total_collects,total_comments,total_shares,publish_count,violation_count_180d,ad_compliance_rate,audit_pass_rate,shadowban_risk,fan_quality_score,cpe,avg_cpe_benchmark,business_stability,note_id,note_title,content_type,is_ad,is_repost,tags,read_count,like_count,collect_count,comment_count,share_count,data_source
 demo_001,示例美妆博主,美妆护肤,2026-06-19,52000,320,120,180000,8200,5100,920,310,1,0,1,0.98,0.04,0.72,2.1,3.0,0.86,note_001,夏季护肤清单,image,false,false,"护肤,夏季",30000,1800,1200,180,70,file
@@ -43,6 +49,11 @@ async def import_account_metrics_file(
     file: UploadFile = File(...), session: Session = Depends(get_session)
 ) -> ImportAccountsResponse:
     content = await file.read()
+    if len(content) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"import file exceeds {MAX_IMPORT_FILE_BYTES // (1024 * 1024)}MB limit",
+        )
     result = import_flat_file(session, file.filename or "upload.csv", content)
     session.commit()
     return result
@@ -82,9 +93,12 @@ def list_import_errors(batch_id: int, session: Session = Depends(get_session)) -
 @router.get("/batches/{batch_id}/errors.csv")
 def download_import_errors(batch_id: int, session: Session = Depends(get_session)) -> Response:
     errors = list_import_errors(batch_id, session)
-    rows = ["row_number,field_name,message,raw_payload"]
+    # csv.writer handles embedded quotes/commas/newlines; hand-rolled quoting
+    # corrupts rows when error text or payloads contain them.
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["row_number", "field_name", "message", "raw_payload"])
     for item in errors:
-        raw_payload = str(item.raw_payload).replace('"', '""')
-        rows.append(f'{item.row_number},{item.field_name},"{item.message}","{raw_payload}"')
+        writer.writerow([item.row_number, item.field_name, item.message, str(item.raw_payload)])
     headers = {"Content-Disposition": f'attachment; filename="import-errors-{batch_id}.csv"'}
-    return Response("\n".join(rows) + "\n", media_type="text/csv; charset=utf-8", headers=headers)
+    return Response(buffer.getvalue(), media_type="text/csv; charset=utf-8", headers=headers)

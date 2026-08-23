@@ -1,4 +1,5 @@
 import csv
+import math
 from datetime import date
 from io import BytesIO, StringIO
 
@@ -69,6 +70,7 @@ def import_accounts(
             row_numbers[index] if row_numbers and index < len(row_numbers) else index + 1
         )
         errors = validate_import_payload(payload)
+        errors.extend(_note_ownership_errors(session, payload))
         if errors:
             error_rows += 1
             if batch is not None:
@@ -275,6 +277,24 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
     return result
 
 
+def _finite_number_or_none(value):
+    """Parse a user-supplied number; reject inf/nan (e.g. "1e999", "nan").
+
+    Returns (parsed, error_message). int(float("1e999")) raises OverflowError
+    and float("nan") poisons scores silently, so both are caught here.
+    """
+    value = _empty_to_none(value)
+    if value is None:
+        return None, None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, "must be a number"
+    if not math.isfinite(parsed):
+        return None, "must be a finite number"
+    return parsed, None
+
+
 def _validate_row(row: dict) -> list[tuple[str, str]]:
     errors: list[tuple[str, str]] = []
     if not _empty_to_none(row.get("platform_uid")):
@@ -304,10 +324,14 @@ def _validate_row(row: dict) -> list[tuple[str, str]]:
         "share_count",
     ):
         if _empty_to_none(row.get(field_name)) is not None:
-            try:
-                int(float(row[field_name]))
-            except (TypeError, ValueError):
-                errors.append((field_name, f"{field_name} must be an integer"))
+            _, message = _finite_number_or_none(row[field_name])
+            if message is None:
+                try:
+                    int(float(row[field_name]))
+                except (TypeError, ValueError, OverflowError):
+                    message = "must be an integer"
+            if message is not None:
+                errors.append((field_name, f"{field_name} {message}"))
 
     for field_name in (
         "ad_compliance_rate",
@@ -319,10 +343,9 @@ def _validate_row(row: dict) -> list[tuple[str, str]]:
         "business_stability",
     ):
         if _empty_to_none(row.get(field_name)) is not None:
-            try:
-                float(row[field_name])
-            except (TypeError, ValueError):
-                errors.append((field_name, f"{field_name} must be a number"))
+            _, message = _finite_number_or_none(row[field_name])
+            if message is not None:
+                errors.append((field_name, f"{field_name} {message}"))
 
     if _empty_to_none(row.get("note_id")) and not _empty_to_none(row.get("data_date")):
         errors.append(("data_date", "note metric rows require data_date"))
@@ -379,6 +402,49 @@ def _split_tags(value):
     return [item.strip() for item in str(value).replace("，", ",").split(",") if item.strip()]
 
 
+def _note_ownership_errors(session: Session, payload: AccountImportIn) -> list[tuple[str, str]]:
+    """Reject note_ids already owned by a different account BEFORE any writes.
+
+    Checking up-front keeps the payload atomic: rejecting after the account and
+    snapshots were written would leave a half-imported row behind.
+    """
+    note_ids = [note.note_id for note in payload.notes]
+    if not note_ids:
+        return []
+    target = session.scalar(select(Account.id).where(Account.platform_uid == payload.platform_uid))
+    owners = {
+        note_id: account_id
+        for note_id, account_id in session.execute(
+            select(Note.note_id, Note.account_id).where(Note.note_id.in_(note_ids))
+        ).all()
+    }
+    errors: list[tuple[str, str]] = []
+    for note_id, owner_id in owners.items():
+        if target is None or owner_id != target:
+            errors.append(
+                (
+                    "note_id",
+                    f"note_id {note_id} already belongs to account {owner_id}",
+                )
+            )
+    return errors
+
+
+def _merge_non_none(target, data: dict, raw_payload: dict | None = None) -> None:
+    """Update `target` with `data`, skipping None values.
+
+    A later import that omits a column must not wipe what an earlier import
+    provided (incremental daily imports routinely lack compliance columns).
+    """
+    for key, value in data.items():
+        if value is not None:
+            setattr(target, key, value)
+    if raw_payload is not None:
+        merged = dict(getattr(target, "raw_payload", None) or {})
+        merged.update({key: value for key, value in data.items() if value is not None})
+        target.raw_payload = _jsonable(merged)
+
+
 def _upsert_account(session: Session, payload: AccountImportIn) -> Account:
     account = session.scalar(select(Account).where(Account.platform_uid == payload.platform_uid))
     data = payload.model_dump(exclude={"snapshots", "notes"})
@@ -387,8 +453,7 @@ def _upsert_account(session: Session, payload: AccountImportIn) -> Account:
         session.add(account)
         session.flush()
         return account
-    for key, value in data.items():
-        setattr(account, key, value)
+    _merge_non_none(account, data)
     session.flush()
     return account
 
@@ -406,9 +471,7 @@ def _upsert_snapshot(session: Session, account_id: int, data: dict) -> AccountDa
         session.add(snapshot)
         session.flush()
         return snapshot
-    for key, value in data.items():
-        setattr(snapshot, key, value)
-    snapshot.raw_payload = _jsonable(data)
+    _merge_non_none(snapshot, data, raw_payload=_jsonable(data))
     session.flush()
     return snapshot
 
@@ -425,9 +488,7 @@ def _upsert_note(session: Session, account_id: int, data: dict) -> Note:
         session.add(note)
         session.flush()
         return note
-    for key, value in data.items():
-        setattr(note, key, value)
-    note.account_id = account_id
+    _merge_non_none(note, data)
     session.flush()
     return note
 
@@ -459,10 +520,6 @@ def _upsert_note_metric(
         session.add(metric)
         session.flush()
         return metric
-    for key, value in data.items():
-        setattr(metric, key, value)
-    metric.account_id = account_id
-    metric.note_pk = note_pk
-    metric.raw_payload = _jsonable(data)
+    _merge_non_none(metric, data, raw_payload=_jsonable(data))
     session.flush()
     return metric

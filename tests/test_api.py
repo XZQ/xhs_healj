@@ -973,3 +973,210 @@ def test_score_history_and_import_batches_limit() -> None:
         assert len(batches.json()) == 1
         newest = batches.json()[0]
         assert newest["id"] == imported.json()["import_batch_id"]
+
+
+# ---------- Adversarial regression tests ----------
+
+def test_overflow_and_nan_values_rejected_not_500() -> None:
+    """1e999 fans_count raised OverflowError (unhandled 500) and cpe=nan passed
+    validation through to the DB; both must become error rows."""
+    suffix = uuid4().hex
+    csv_body = (
+        "platform_uid,nickname,data_date,fans_count,cpe\n"
+        f"ovf_{suffix},溢出,2026-06-19,1e999,2.1\n"
+        f"nan_{suffix},非数,2026-06-19,100,nan\n"
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("adv.csv", csv_body.encode("utf-8"), "text/csv")},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accounts_upserted"] == 0
+        assert body["error_rows"] == 2
+
+        errors = client.get(f"/api/v1/imports/batches/{body['import_batch_id']}/errors")
+        messages = " | ".join(err["message"] for err in errors.json())
+        assert "fans_count must be a finite number" in messages
+        assert "cpe must be a finite number" in messages
+
+
+def test_json_nan_cpe_rejected() -> None:
+    import json
+    """Python json accepts NaN tokens, so JSON imports can smuggle NaN past
+    pydantic; validate_import_payload must reject it."""
+    payload = {
+        "platform_uid": f"nan_{uuid4().hex}",
+        "nickname": "NaN注入",
+        "cpe": None,  # placeholder; swapped to a raw NaN token below
+        "snapshots": [
+            {"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 1}
+        ],
+    }
+
+    with TestClient(app) as client:
+        # Send the raw NaN token — server-side json.loads accepts it even though
+        # httpx's json= helper refuses to encode NaN.
+        imported = client.post(
+            "/api/v1/imports/accounts",
+            content=json.dumps({"accounts": [payload]}).replace('"cpe": null', '"cpe": NaN'),
+            headers={"Content-Type": "application/json"},
+        )
+        assert imported.status_code == 200
+        assert imported.json()["error_rows"] == 1
+
+        errors = client.get(
+            f"/api/v1/imports/batches/{imported.json()['import_batch_id']}/errors"
+        )
+        assert any(err["field_name"] == "cpe" for err in errors.json())
+
+
+def test_reimport_preserves_profile_fields() -> None:
+    """An incremental daily import without compliance columns must not wipe the
+    compliance/conversion fields an earlier import provided."""
+    platform_uid = f"keep_{uuid4().hex}"
+    full = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "增量导入",
+                "ad_compliance_rate": 0.95,
+                "shadowban_risk": 0.02,
+                "snapshots": [
+                    {"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 5}
+                ],
+            }
+        ]
+    }
+    incremental = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "增量导入",
+                "snapshots": [
+                    {"data_date": "2026-06-20", "fans_count": 150, "fans_delta": 50}
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        assert client.post("/api/v1/imports/accounts", json=full).status_code == 200
+        assert client.post("/api/v1/imports/accounts", json=incremental).status_code == 200
+
+        from sqlalchemy import select as sa_select
+
+        from xhs_health.db import SessionLocal
+        from xhs_health.models import Account as AccountModel
+
+        session = SessionLocal()
+        try:
+            account = session.scalar(
+                sa_select(AccountModel).where(AccountModel.platform_uid == platform_uid)
+            )
+            assert float(account.ad_compliance_rate) == 0.95
+            assert float(account.shadowban_risk) == 0.02
+        finally:
+            session.close()
+
+
+def test_note_conflict_rejects_whole_payload_atomically() -> None:
+    """A payload with a conflicting note_id must be rejected in full — the old
+    flow wrote the account and snapshots, then 'rejected' the row."""
+    from sqlalchemy import select as sa_select
+
+    from xhs_health.db import SessionLocal
+    from xhs_health.models import Account as AccountModel
+
+    shared_note = f"note_{uuid4().hex}"
+    uid_a, uid_b = f"uid_{uuid4().hex}", f"uid_{uuid4().hex}"
+    snapshot = {"data_date": "2026-06-19", "fans_count": 100, "fans_delta": 5}
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/imports/accounts",
+            json={
+                "accounts": [
+                    {
+                        "platform_uid": uid_a,
+                        "nickname": "A",
+                        "snapshots": [snapshot],
+                        "notes": [{"note_id": shared_note}],
+                    }
+                ]
+            },
+        )
+        assert first.status_code == 200
+
+        second = client.post(
+            "/api/v1/imports/accounts",
+            json={
+                "accounts": [
+                    {
+                        "platform_uid": uid_b,
+                        "nickname": "B",
+                        "snapshots": [snapshot],
+                        "notes": [{"note_id": shared_note}],
+                    }
+                ]
+            },
+        )
+        assert second.status_code == 200
+        body = second.json()
+        assert body["accounts_upserted"] == 0
+        assert body["error_rows"] == 1
+
+        session = SessionLocal()
+        try:
+            account_b = session.scalar(
+                sa_select(AccountModel).where(AccountModel.platform_uid == uid_b)
+            )
+            assert account_b is None, "rejected payload must not leave an account behind"
+        finally:
+            session.close()
+
+
+def test_import_file_size_cap(monkeypatch) -> None:
+    monkeypatch.setattr("xhs_health.api.imports.MAX_IMPORT_FILE_BYTES", 16)
+    csv_body = b"platform_uid,nickname,data_date\nx,y,2026-06-19\n" + b"#"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("big.csv", csv_body, "text/csv")},
+        )
+        assert response.status_code == 413
+
+
+def test_errors_csv_survives_hostile_text() -> None:
+    """Quotes/newlines/commas in nicknames and messages must round-trip through
+    the error CSV without corrupting row structure."""
+    suffix = uuid4().hex
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": f"evil_{suffix}",
+                "nickname": 'a\nb",=1+1"x',
+                "ad_compliance_rate": 1.5,  # triggers the error row
+                "snapshots": [{"data_date": "2026-06-19", "fans_count": 100}],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json=payload)
+        assert imported.status_code == 200
+        batch_id = imported.json()["import_batch_id"]
+
+        import csv as csv_mod
+        import io
+
+        download = client.get(f"/api/v1/imports/batches/{batch_id}/errors.csv")
+        assert download.status_code == 200
+        rows = list(csv_mod.reader(io.StringIO(download.text)))
+        assert rows[0] == ["row_number", "field_name", "message", "raw_payload"]
+        data_rows = [r for r in rows[1:] if r]
+        assert data_rows, "error rows must be present"
+        for row in data_rows:
+            assert len(row) == 4, f"corrupted row: {row!r}"

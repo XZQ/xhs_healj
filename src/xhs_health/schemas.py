@@ -1,3 +1,4 @@
+import math
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -115,10 +116,14 @@ def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
         value = getattr(payload, field_name)
         if not _in_range(value, 0.0, 1.0):
             errors.append((field_name, f"{field_name} must be between 0 and 1"))
-    if payload.cpe is not None and payload.cpe < 0:
-        errors.append(("cpe", "cpe must be >= 0"))
-    if payload.avg_cpe_benchmark is not None and payload.avg_cpe_benchmark < 0:
-        errors.append(("avg_cpe_benchmark", "must be >= 0"))
+    for field_name in ("cpe", "avg_cpe_benchmark"):
+        # NaN/inf pass "< 0" checks (comparisons are False) but poison scores;
+        # Python's json module happily parses NaN/Infinity tokens.
+        value = getattr(payload, field_name)
+        if value is not None and not math.isfinite(value):
+            errors.append((field_name, f"{field_name} must be a finite number"))
+        elif value is not None and value < 0:
+            errors.append((field_name, f"{field_name} must be >= 0"))
     for snapshot in payload.snapshots:
         if snapshot.fans_count is not None and snapshot.fans_count < 0:
             errors.append(("fans_count", "fans_count must be >= 0"))

@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import delete, desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from xhs_health.models import Account, AccountDailySnapshot, Alert, AlertRule, Note, NoteDailyMetric, Score
@@ -117,12 +118,31 @@ def calculate_and_store_score(
 
     if existing is None:
         score = Score(**score_data)
-        session.add(score)
+        try:
+            # Savepoint so a concurrent insert of the same unique key only
+            # rolls back this row (API trigger racing the scheduler thread),
+            # not the rest of an in-flight batch.
+            with session.begin_nested():
+                session.add(score)
+                session.flush()
+        except IntegrityError:
+            score = session.scalar(
+                select(Score).where(
+                    Score.account_id == account_id,
+                    Score.score_date == target_date,
+                    Score.model_version == MODEL_VERSION,
+                )
+            )
+            if score is None:
+                raise
+            for key, value in score_data.items():
+                setattr(score, key, value)
+            session.flush()
     else:
         score = existing
         for key, value in score_data.items():
             setattr(score, key, value)
-    session.flush()
+        session.flush()
     _refresh_score_alerts(session, account, score, result.warning_flags, thresholds)
     return score
 
