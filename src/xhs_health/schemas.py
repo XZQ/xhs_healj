@@ -276,6 +276,10 @@ class AlertRuleUpdate(BaseModel):
     @field_validator("threshold_value")
     @classmethod
     def _threshold_finite(cls, value: float | None) -> float | None:
+        # Explicit null reaches setattr and violates the NOT NULL column at
+        # commit (500); "absent" never enters this validator thanks to exclude_unset.
+        if value is None:
+            raise ValueError("threshold_value cannot be null")
         return _require_finite(value, "threshold_value")
 
 
@@ -393,7 +397,8 @@ class NotificationChannelUpdate(BaseModel):
     @classmethod
     def _config_finite(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
-            return None
+            # config column is NOT NULL; an explicit null would 500 at commit.
+            raise ValueError("config cannot be null")
         return _require_finite_json(value, "config")
 
 

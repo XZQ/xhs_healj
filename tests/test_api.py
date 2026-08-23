@@ -1448,3 +1448,72 @@ def test_json_blob_fields_reject_non_finite() -> None:
             headers=json_headers,
         )
         assert test_fire.status_code == 422
+
+
+def test_update_endpoints_reject_null_and_duplicate_name() -> None:
+    """Update paths that reached commit with illegal values exploded as 500s:
+    explicit null on NOT NULL columns (threshold_value, config) and renaming
+    to another row's unique name."""
+    suffix = uuid4().hex
+    json_headers = {"Content-Type": "application/json"}
+    with TestClient(app) as client:
+        client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "name": f"dup_a_{suffix}",
+                "alert_type": "custom_dup",
+                "metric_name": "total_score",
+                "operator": "lt",
+                "threshold_value": 55.0,
+            },
+        )
+        second = client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "name": f"dup_b_{suffix}",
+                "alert_type": "custom_dup",
+                "metric_name": "total_score",
+                "operator": "lt",
+                "threshold_value": 60.0,
+            },
+        ).json()
+
+        null_threshold = client.put(
+            f"/api/v1/alerts/rules/{second['id']}", content=b'{"threshold_value":null}', headers=json_headers
+        )
+        assert null_threshold.status_code == 422
+
+        rename_clash = client.put(
+            f"/api/v1/alerts/rules/{second['id']}",
+            content=f'{{"name":"dup_a_{suffix}"}}'.encode(),
+            headers=json_headers,
+        )
+        assert rename_clash.status_code == 409
+
+        same_name = client.put(
+            f"/api/v1/alerts/rules/{second['id']}",
+            content=f'{{"name":"dup_b_{suffix}"}}'.encode(),
+            headers=json_headers,
+        )
+        assert same_name.status_code == 200
+
+        channel = client.post(
+            "/api/v1/notifications/channels",
+            json={"name": f"chan_a_{suffix}", "channel_type": "webhook", "target": "https://x"},
+        ).json()
+        other_channel = client.post(
+            "/api/v1/notifications/channels",
+            json={"name": f"chan_b_{suffix}", "channel_type": "webhook", "target": "https://x"},
+        ).json()
+        null_config = client.put(
+            f"/api/v1/notifications/channels/{channel['id']}",
+            content=b'{"config":null}',
+            headers=json_headers,
+        )
+        assert null_config.status_code == 422
+        channel_clash = client.put(
+            f"/api/v1/notifications/channels/{other_channel['id']}",
+            content=f'{{"name":"chan_a_{suffix}"}}'.encode(),
+            headers=json_headers,
+        )
+        assert channel_clash.status_code == 409

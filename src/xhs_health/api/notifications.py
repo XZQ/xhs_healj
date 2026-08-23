@@ -80,6 +80,14 @@ def update_notification_channel(
     channel = session.get(NotificationChannel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="notification channel not found")
+    if payload.name is not None and payload.name != channel.name:
+        clash = session.scalar(
+            select(NotificationChannel).where(
+                NotificationChannel.name == payload.name, NotificationChannel.id != channel_id
+            )
+        )
+        if clash:
+            raise HTTPException(status_code=409, detail="notification channel name already exists")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(channel, field, value)
     _audit(

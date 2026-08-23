@@ -74,6 +74,12 @@ def update_alert_rule(
     rule = session.get(AlertRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="alert rule not found")
+    if payload.name is not None and payload.name != rule.name:
+        clash = session.scalar(
+            select(AlertRule).where(AlertRule.name == payload.name, AlertRule.id != rule_id)
+        )
+        if clash:
+            raise HTTPException(status_code=409, detail="alert rule name already exists")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(rule, field, value)
     session.commit()
