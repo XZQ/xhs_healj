@@ -56,6 +56,16 @@ docker compose up --build
 
 Compose 会启动 PostgreSQL、API 和前端 Nginx。默认账号密码只用于本地开发，生产环境请改用 Secret Manager 或安全的环境变量注入。
 
+Compose 的本地默认 API Token 是 `xhs-local-dev-token`。首次打开 Dashboard
+时，在右上角的 API Token 输入框中填写该值。也可以在启动前覆盖：
+
+```powershell
+$env:APP_API_TOKEN = "replace-with-a-strong-random-token"
+docker compose up --build
+```
+
+生产环境必须覆盖数据库密码和 API Token；不要使用仓库中的本地默认值。
+
 ## Database Migrations
 
 MVP 仍会在应用启动时自动创建 SQLite 表，方便开发快速运行。正式环境建议使用 Alembic：
@@ -77,7 +87,7 @@ alembic upgrade head
 | `POST` | `/api/v1/scores/trigger` | calculate score |
 | `GET` | `/api/v1/scores/{account_id}` | latest score |
 | `GET` | `/api/v1/scores/{account_id}/history` | score history |
-| `GET` | `/api/v1/alerts` | list alerts |
+| `GET` | `/api/v1/alerts` | list alerts (pagination via `limit`/`offset`; filters `account_id`, `unresolved_only`) |
 | `GET` | `/api/v1/alerts/rules` | list custom alert rules |
 | `POST` | `/api/v1/alerts/rules` | create a custom alert rule |
 | `GET` | `/api/v1/groups` | list account groups |
@@ -174,6 +184,10 @@ note_id,note_title,content_type,is_ad,is_repost,tags,read_count,like_count,colle
   ]
 }
 ```
+
+## Scoring Window & Tuning
+
+评分默认只统计最新数据日期往前 30 天的分析窗口:发布频率取窗口内快照的均值,窗口外的陈旧笔记不参与内容评分(数据缺失时输出 unknown 而不是按 0 分计)。所有评分与告警阈值均可通过 `SCORE_*` 环境变量调整,例如 `SCORE_ANALYSIS_WINDOW_DAYS=30`、`SCORE_ALERT_LOW_SCORE=55`、`SCORE_ALERT_INACTIVE_DAYS=14`;完整清单见 `src/xhs_health/services/scoring.py` 中的 `ScoreThresholds`。
 
 ## Tests
 

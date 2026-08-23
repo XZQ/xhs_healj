@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from xhs_health.db import get_session
 from xhs_health.models import Account, AccountGroup, AccountGroupMember
@@ -34,7 +34,13 @@ def create_group(payload: AccountGroupCreate, session: Session = Depends(get_ses
 
 @router.get("", response_model=list[AccountGroupOut])
 def list_groups(session: Session = Depends(get_session)) -> list[AccountGroupOut]:
-    groups = list(session.scalars(select(AccountGroup).order_by(AccountGroup.id.asc())).all())
+    groups = list(
+        session.scalars(
+            select(AccountGroup)
+            .order_by(AccountGroup.id.asc())
+            .options(selectinload(AccountGroup.members))
+        ).all()
+    )
     return [_serialize_group(group) for group in groups]
 
 

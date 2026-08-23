@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from fastapi import APIRouter, Depends
@@ -14,13 +14,23 @@ router = APIRouter()
 @router.get("/overview", response_model=OverviewStatsOut)
 def overview_stats(session: Session = Depends(get_session)) -> OverviewStatsOut:
     monitored_accounts = session.scalar(select(func.count()).select_from(Account)) or 0
-    latest_score_ids = (
-        select(func.max(Score.id).label("id"))
-        .group_by(Score.account_id)
+    # Latest score per account by (score_date, created_at) — same semantics as the
+    # accounts endpoint. max(id) would misclassify a backfilled historical score
+    # (newer id, older date) as the account's current state.
+    sub = (
+        select(
+            Score.id.label("sid"),
+            func.row_number()
+            .over(
+                partition_by=Score.account_id,
+                order_by=[desc(Score.score_date), desc(Score.created_at)],
+            )
+            .label("rn"),
+        )
         .subquery()
     )
     latest_scores = list(
-        session.scalars(select(Score).join(latest_score_ids, Score.id == latest_score_ids.c.id)).all()
+        session.scalars(select(Score).join(sub, Score.id == sub.c.sid).where(sub.c.rn == 1)).all()
     )
     healthy_accounts = sum(1 for score in latest_scores if float(score.total_score) >= 70)
     warning_accounts = sum(1 for score in latest_scores if 55 <= float(score.total_score) < 70)

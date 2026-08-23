@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from xhs_health.db import get_session
@@ -13,8 +13,29 @@ router = APIRouter()
 
 
 @router.get("", response_model=list[AlertOut])
-def list_alerts(session: Session = Depends(get_session)) -> list[Alert]:
-    return list(session.scalars(select(Alert).order_by(Alert.created_at.desc())).all())
+def list_alerts(
+    account_id: int | None = None,
+    unresolved_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    response: Response = None,
+    session: Session = Depends(get_session),
+) -> list[Alert]:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    stmt = select(Alert)
+    if account_id is not None:
+        stmt = stmt.where(Alert.account_id == account_id)
+    if unresolved_only:
+        stmt = stmt.where(Alert.is_resolved.is_(False))
+    total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+    if response is not None:
+        response.headers["X-Total-Count"] = str(total)
+    return list(
+        session.scalars(
+            stmt.order_by(Alert.created_at.desc(), Alert.id.desc()).limit(limit).offset(offset)
+        ).all()
+    )
 
 
 @router.put("/{alert_id}/resolve", response_model=AlertOut)

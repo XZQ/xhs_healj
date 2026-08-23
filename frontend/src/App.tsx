@@ -94,7 +94,7 @@ function App() {
         await Promise.all([
           requestWithMeta<Account[]>(accountPath),
           request<AccountGroup[]>("/groups"),
-          request<Alert[]>("/alerts"),
+          request<Alert[]>("/alerts?limit=200"),
           request<OverviewStats>("/stats/overview"),
           request<ImportBatch[]>("/imports/batches"),
           request<AlertRule[]>("/alerts/rules"),
@@ -149,7 +149,7 @@ function App() {
     });
     setScores((current) => ({ ...current, [accountId]: score }));
     const [nextAlerts, nextOverview] = await Promise.all([
-      request<Alert[]>("/alerts"),
+      request<Alert[]>("/alerts?limit=200"),
       request<OverviewStats>("/stats/overview")
     ]);
     setAlerts(nextAlerts);
@@ -170,7 +170,7 @@ function App() {
         ...Object.fromEntries(batch.map((score) => [score.account_id, score]))
       }));
       const [nextAlerts, nextOverview] = await Promise.all([
-        request<Alert[]>("/alerts"),
+        request<Alert[]>("/alerts?limit=200"),
         request<OverviewStats>("/stats/overview")
       ]);
       setAlerts(nextAlerts);
@@ -184,7 +184,7 @@ function App() {
   async function resolveAlert(alertId: number) {
     await request<Alert>(`/alerts/${alertId}/resolve`, { method: "PUT" });
     const [nextAlerts, nextOverview] = await Promise.all([
-      request<Alert[]>("/alerts"),
+      request<Alert[]>("/alerts?limit=200"),
       request<OverviewStats>("/stats/overview")
     ]);
     setAlerts(nextAlerts);

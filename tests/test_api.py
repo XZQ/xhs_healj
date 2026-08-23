@@ -1,7 +1,10 @@
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
+from xhs_health.auth import build_auth_middleware
+from xhs_health.config import _positive_int_env
 from xhs_health.main import app
 
 
@@ -103,6 +106,40 @@ def test_import_and_score_flow() -> None:
         overview = client.get("/api/v1/stats/overview")
         assert overview.status_code == 200
         assert overview.json()["monitored_accounts"] >= 1
+
+
+def test_auth_middleware_protects_private_routes() -> None:
+    from fastapi import FastAPI
+
+    protected_app = FastAPI()
+    protected_app.middleware("http")(build_auth_middleware("/api/v1", "test-token"))
+
+    @protected_app.get("/api/v1/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @protected_app.get("/api/v1/private")
+    def private() -> dict[str, bool]:
+        return {"ok": True}
+
+    with TestClient(protected_app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        unauthorized = client.get("/api/v1/private")
+        assert unauthorized.status_code == 401
+        assert unauthorized.headers["www-authenticate"] == "Bearer"
+        authorized = client.get(
+            "/api/v1/private", headers={"Authorization": "Bearer test-token"}
+        )
+        assert authorized.status_code == 200
+
+
+def test_scheduler_interval_must_be_positive(monkeypatch) -> None:
+    monkeypatch.setenv("SCHEDULER_INTERVAL_SECONDS", "30")
+    with pytest.raises(ValueError, match="must be at least 60"):
+        _positive_int_env("SCHEDULER_INTERVAL_SECONDS", 3600, minimum=60)
+    monkeypatch.setenv("SCHEDULER_INTERVAL_SECONDS", "abc")
+    with pytest.raises(ValueError, match="must be an integer"):
+        _positive_int_env("SCHEDULER_INTERVAL_SECONDS", 3600, minimum=60)
 
 
 def test_csv_file_import() -> None:
@@ -517,3 +554,329 @@ def test_csv_business_rule_violation_recorded_as_error() -> None:
             err["field_name"] == "ad_compliance_rate" for err in errors.json()
         ), errors.json()
 
+
+
+def _account_payload(platform_uid: str, note_id: str, note_date: str) -> dict:
+    return {
+        "platform_uid": platform_uid,
+        "nickname": "审计测试博主",
+        "snapshots": [
+            {
+                "data_date": "2026-06-19",
+                "fans_count": 12000,
+                "fans_delta": 120,
+                "total_reads": 50000,
+                "total_likes": 1800,
+                "total_collects": 900,
+                "total_comments": 160,
+                "total_shares": 80,
+                "publish_count": 1,
+            }
+        ],
+        "notes": [
+            {
+                "note_id": note_id,
+                "title": "测试笔记",
+                "publish_time": f"{note_date}T10:00:00+08:00",
+                "is_ad": False,
+                "is_original": True,
+                "tags": ["测试"],
+                "metrics": [
+                    {
+                        "data_date": note_date,
+                        "read_count": 8000,
+                        "like_count": 500,
+                        "collect_count": 200,
+                        "comment_count": 50,
+                        "share_count": 20,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_note_import_conflict_recorded_in_batch() -> None:
+    """A note_id already owned by another account must be rejected with an
+    ImportErrorRow instead of silently reassigning its owner."""
+    from sqlalchemy import select as sa_select
+
+    from xhs_health.db import SessionLocal
+    from xhs_health.models import Note as NoteModel
+
+    shared_note = f"note_{uuid4().hex}"
+    uid_a, uid_b = f"uid_{uuid4().hex}", f"uid_{uuid4().hex}"
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/imports/accounts",
+            json={"accounts": [_account_payload(uid_a, shared_note, "2026-06-19")]},
+        )
+        assert first.status_code == 200
+        assert first.json()["error_rows"] == 0
+
+        second = client.post(
+            "/api/v1/imports/accounts",
+            json={"accounts": [_account_payload(uid_b, shared_note, "2026-06-19")]},
+        )
+        assert second.status_code == 200
+        assert second.json()["error_rows"] == 1
+
+        batch_id = second.json()["import_batch_id"]
+        errors = client.get(f"/api/v1/imports/batches/{batch_id}/errors")
+        conflict = next(err for err in errors.json() if err["field_name"] == "note_id")
+        assert conflict["row_number"] == 1
+        assert shared_note in conflict["message"]
+
+        account_a = next(
+            item for item in client.get("/api/v1/accounts").json() if item["platform_uid"] == uid_a
+        )
+        session = SessionLocal()
+        try:
+            note = session.scalar(sa_select(NoteModel).where(NoteModel.note_id == shared_note))
+            assert note is not None
+            assert note.account_id == account_a["id"]
+        finally:
+            session.close()
+
+
+def test_json_import_error_row_numbering_starts_at_one() -> None:
+    payload = _account_payload(f"uid_{uuid4().hex}", f"note_{uuid4().hex}", "2026-06-19")
+    payload["ad_compliance_rate"] = 1.5  # business-rule failure on the first account
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json={"accounts": [payload]})
+        assert imported.status_code == 200
+        assert imported.json()["error_rows"] == 1
+
+        errors = client.get(f"/api/v1/imports/batches/{imported.json()['import_batch_id']}/errors")
+        assert errors.json()[0]["row_number"] == 1
+
+
+def test_stale_notes_excluded_from_scoring() -> None:
+    """Notes whose metrics/publish date fall outside the analysis window must
+    not feed the content dimension."""
+    platform_uid = f"stale_{uuid4().hex}"
+    payload = _account_payload(platform_uid, f"note_{uuid4().hex}", "2026-01-01")
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json={"accounts": [payload]})
+        assert imported.status_code == 200
+
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts").json()
+            if item["platform_uid"] == platform_uid
+        )
+        score = client.post("/api/v1/scores/trigger", json={"account_id": account_id})
+        assert score.status_code == 200
+        assert score.json()["content_score"] is None
+        assert "notes" in score.json()["missing_fields"]
+
+
+def test_alert_thresholds_configurable() -> None:
+    """Alert cut-offs come from ScoreThresholds, so callers can tune them."""
+    from datetime import date
+
+    from sqlalchemy import select as sa_select
+
+    from xhs_health.db import SessionLocal
+    from xhs_health.models import Account as AccountModel
+    from xhs_health.models import Alert as AlertModel
+    from xhs_health.models import AccountDailySnapshot as SnapshotModel
+    from xhs_health.services.score_service import calculate_and_store_score
+    from xhs_health.services.scoring import ScoreThresholds
+
+    platform_uid = f"th_{uuid4().hex}"
+    with TestClient(app):  # ensures init_db has run
+        session = SessionLocal()
+        try:
+            account = AccountModel(platform_uid=platform_uid, nickname="阈值测试")
+            session.add(account)
+            session.flush()
+            session.add(
+                SnapshotModel(
+                    account_id=account.id,
+                    data_date=date(2026, 6, 19),
+                    fans_count=52000,
+                    fans_delta=320,
+                    total_reads=180000,
+                    total_likes=8200,
+                    total_collects=5100,
+                    total_comments=920,
+                    total_shares=310,
+                    publish_count=1,
+                    data_source="manual",
+                )
+            )
+            session.commit()
+
+            calculate_and_store_score(session, account.id)
+            session.commit()
+            default_alerts = session.scalars(
+                sa_select(AlertModel).where(
+                    AlertModel.account_id == account.id,
+                    AlertModel.alert_type == "low_score",
+                )
+            ).all()
+            assert default_alerts == []
+
+            calculate_and_store_score(
+                session, account.id, thresholds=ScoreThresholds(alert_low_score=200.0)
+            )
+            session.commit()
+            tuned = session.scalars(
+                sa_select(AlertModel).where(
+                    AlertModel.account_id == account.id,
+                    AlertModel.alert_type == "low_score",
+                )
+            ).all()
+            assert len(tuned) == 1
+            assert float(tuned[0].threshold_value) == 200.0
+        finally:
+            session.close()
+
+
+def test_alerts_pagination_and_filters() -> None:
+    platform_uid = f"pag_{uuid4().hex}"
+    payload = {
+        "accounts": [
+            {
+                "platform_uid": platform_uid,
+                "nickname": "分页测试账号",
+                "snapshots": [
+                    {
+                        "data_date": "2026-06-19",
+                        "fans_count": 100,
+                        "fans_delta": -20,
+                        "total_reads": 1000,
+                        "total_likes": 1,
+                        "total_collects": 1,
+                        "total_comments": 0,
+                        "total_shares": 0,
+                        "publish_count": 0,
+                    }
+                ],
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/imports/accounts", json=payload)
+        assert imported.status_code == 200
+        account_id = next(
+            item["id"]
+            for item in client.get("/api/v1/accounts").json()
+            if item["platform_uid"] == platform_uid
+        )
+        assert client.post("/api/v1/scores/trigger", json={"account_id": account_id}).status_code == 200
+
+        scoped = client.get(f"/api/v1/alerts?account_id={account_id}")
+        total = int(scoped.headers["X-Total-Count"])
+        assert total >= 2
+
+        low_confidence = next(
+            a for a in scoped.json() if a["alert_type"] == "low_confidence"
+        )
+        assert low_confidence["threshold_value"] == 0.6
+
+        first = client.get(f"/api/v1/alerts?account_id={account_id}&limit=1")
+        assert len(first.json()) == 1
+        assert first.headers["X-Total-Count"] == str(total)
+        second = client.get(f"/api/v1/alerts?account_id={account_id}&limit=1&offset=1")
+        assert len(second.json()) == 1
+        assert second.json()[0]["id"] != first.json()[0]["id"]
+
+        unresolved = client.get(
+            f"/api/v1/alerts?account_id={account_id}&unresolved_only=true&limit=500"
+        )
+        assert all(a["is_resolved"] is False for a in unresolved.json())
+        assert len(unresolved.json()) == total
+
+        assert (
+            client.put(f"/api/v1/alerts/{first.json()[0]['id']}/resolve").status_code == 200
+        )
+        after = client.get(
+            f"/api/v1/alerts?account_id={account_id}&unresolved_only=true&limit=500"
+        )
+        assert int(after.headers["X-Total-Count"]) == total - 1
+
+
+def test_negative_counters_rejected() -> None:
+    """Cumulative counters (reads/likes/...) must be non-negative; fans_delta
+    stays signed because losing fans is legitimate."""
+    suffix = uuid4().hex
+    csv_body = (
+        "platform_uid,nickname,data_date,fans_count,total_reads,note_id,read_count\n"
+        f"neg_{suffix},负数计数,2026-06-19,100,-5,,\n"
+        f"neg_{suffix},负数计数,2026-06-19,100,1000,bad_note_{suffix},-3\n"
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("negative.csv", csv_body.encode("utf-8"), "text/csv")},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accounts_upserted"] == 0
+        assert body["error_rows"] == 1
+
+        errors = client.get(f"/api/v1/imports/batches/{body['import_batch_id']}/errors")
+        fields = {err["field_name"] for err in errors.json()}
+        assert "total_reads" in fields
+        assert "read_count" in fields
+
+
+def test_overview_uses_latest_score_by_date() -> None:
+    """A backfilled historical score (larger id, older date) must not change the
+    account's classification in overview stats."""
+    from datetime import date
+
+    from xhs_health.db import SessionLocal
+    from xhs_health.models import Account as AccountModel
+    from xhs_health.models import Score as ScoreModel
+
+    platform_uid = f"ov_{uuid4().hex}"
+    with TestClient(app) as client:
+        session = SessionLocal()
+        try:
+            account = AccountModel(platform_uid=platform_uid, nickname="口径测试")
+            session.add(account)
+            session.flush()
+            session.add(
+                ScoreModel(
+                    account_id=account.id,
+                    score_date=date(2026, 6, 19),
+                    total_score=80,
+                    health_level="B",
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        before = client.get("/api/v1/stats/overview").json()
+
+        from sqlalchemy import select as sa_select
+
+        session = SessionLocal()
+        try:
+            account = session.scalar(
+                sa_select(AccountModel).where(AccountModel.platform_uid == platform_uid)
+            )
+            session.add(
+                ScoreModel(
+                    account_id=account.id,
+                    score_date=date(2026, 6, 10),  # backfilled: larger id, older date
+                    total_score=30,
+                    health_level="D",
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        after = client.get("/api/v1/stats/overview").json()
+        for key in ("healthy_accounts", "warning_accounts", "risky_accounts"):
+            assert after[key] == before[key], key
