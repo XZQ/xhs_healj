@@ -46,12 +46,15 @@ def import_accounts(
     session: Session,
     accounts: list[AccountImportIn],
     batch: ImportBatch | None = None,
+    row_numbers: list[int] | None = None,
 ) -> ImportAccountsResponse:
     """Import JSON-style accounts.
 
     When `batch` is provided, validation errors are recorded as ImportErrorRow
     entries and the batch is finalised with status / error counts. This unifies
     JSON import with the CSV/XLSX path so both share the same audit trail.
+    `row_numbers` maps each payload to its original source row (e.g. the first
+    CSV row of an aggregated account); without it, payloads are numbered from 1.
     """
     counts = {
         "accounts_upserted": 0,
@@ -61,7 +64,10 @@ def import_accounts(
     }
     error_rows = 0
 
-    for index, payload in enumerate(accounts, start=2):
+    for index, payload in enumerate(accounts):
+        row_number = (
+            row_numbers[index] if row_numbers and index < len(row_numbers) else index + 1
+        )
         errors = validate_import_payload(payload)
         if errors:
             error_rows += 1
@@ -70,7 +76,7 @@ def import_accounts(
                     session.add(
                         ImportErrorRow(
                             batch_id=batch.id,
-                            row_number=index,
+                            row_number=row_number,
                             field_name=field_name,
                             message=message,
                             raw_payload=_jsonable(payload.model_dump()),
@@ -94,13 +100,27 @@ def import_accounts(
                     metric_data = metric_payload.model_dump()
                     _upsert_note_metric(session, account.id, note.id, note.note_id, metric_data)
                     counts["note_metrics_upserted"] += 1
+        except ValueError as exc:
+            # Business-rule violation inside upsert (e.g. note_id owned by another
+            # account): record against the offending row instead of failing silent.
+            error_rows += 1
+            if batch is not None:
+                session.add(
+                    ImportErrorRow(
+                        batch_id=batch.id,
+                        row_number=row_number,
+                        field_name="note_id",
+                        message=str(exc),
+                        raw_payload=_jsonable(payload.model_dump()),
+                    )
+                )
         except Exception as exc:  # pragma: no cover - defensive
             error_rows += 1
             if batch is not None:
                 session.add(
                     ImportErrorRow(
                         batch_id=batch.id,
-                        row_number=index,
+                        row_number=row_number,
                         field_name="__row__",
                         message=f"unexpected error: {exc}",
                         raw_payload=_jsonable(payload.model_dump()),
@@ -126,6 +146,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
 
     accounts: dict[str, dict] = {}
     account_first_row: dict[str, int] = {}
+    row_level_errors = 0
     for index, row in enumerate(rows, start=2):
         errors = _validate_row(row)
         if errors:
@@ -139,7 +160,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                         raw_payload=_jsonable(row),
                     )
                 )
-            batch.error_rows += 1
+            row_level_errors += 1
             continue
 
         platform_uid = str(row.get("platform_uid") or "").strip()
@@ -208,6 +229,7 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
     # original CSV row number of that account's first appearance. This catches
     # violations (e.g. ratio out of [0,1]) that _validate_row's type checks miss.
     valid_payloads: list[AccountImportIn] = []
+    valid_row_numbers: list[int] = []
     account_level_errors = 0
     for platform_uid, raw in accounts.items():
         try:
@@ -239,10 +261,13 @@ def import_flat_file(session: Session, filename: str, content: bytes) -> ImportA
                 )
             continue
         valid_payloads.append(payload)
+        valid_row_numbers.append(account_first_row[platform_uid])
 
-    result = import_accounts(session, valid_payloads)  # no batch: rows already audited above
+    # Pass the batch through so upsert-time failures (e.g. a note_id owned by
+    # another account) also land in the batch error trail.
+    result = import_accounts(session, valid_payloads, batch=batch, row_numbers=valid_row_numbers)
     batch.valid_rows = result.accounts_upserted
-    batch.error_rows = batch.error_rows + account_level_errors
+    batch.error_rows = row_level_errors + account_level_errors + result.error_rows
     batch.status = "completed_with_errors" if batch.error_rows else "completed"
     result.import_batch_id = batch.id
     result.total_rows = batch.total_rows
@@ -390,6 +415,11 @@ def _upsert_snapshot(session: Session, account_id: int, data: dict) -> AccountDa
 
 def _upsert_note(session: Session, account_id: int, data: dict) -> Note:
     note = session.scalar(select(Note).where(Note.note_id == data["note_id"]))
+    if note is not None and note.account_id != account_id:
+        # note_id is globally unique: never silently reassign a note to another account.
+        raise ValueError(
+            f"note_id {data['note_id']} already belongs to account {note.account_id}"
+        )
     if note is None:
         note = Note(account_id=account_id, **data)
         session.add(note)

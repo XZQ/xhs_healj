@@ -85,6 +85,24 @@ def _in_range(value: float | None, low: float, high: float) -> bool:
     return value is None or low <= value <= high
 
 
+# Cumulative counters: negative values are always bad input (fans_delta is NOT
+# here — losing fans is legitimate and must be scored, not rejected).
+SNAPSHOT_COUNTER_FIELDS = (
+    "total_reads",
+    "total_likes",
+    "total_collects",
+    "total_comments",
+    "total_shares",
+)
+NOTE_METRIC_COUNTER_FIELDS = (
+    "read_count",
+    "like_count",
+    "collect_count",
+    "comment_count",
+    "share_count",
+)
+
+
 def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
     """Business-rule checks layered on top of pydantic type validation."""
     errors: list[ValidationError] = []
@@ -106,6 +124,16 @@ def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
             errors.append(("fans_count", "fans_count must be >= 0"))
         if snapshot.publish_count is not None and snapshot.publish_count < 0:
             errors.append(("publish_count", "publish_count must be >= 0"))
+        for field_name in SNAPSHOT_COUNTER_FIELDS:
+            value = getattr(snapshot, field_name)
+            if value is not None and value < 0:
+                errors.append((field_name, f"{field_name} must be >= 0"))
+    for note in payload.notes:
+        for metric in note.metrics:
+            for field_name in NOTE_METRIC_COUNTER_FIELDS:
+                value = getattr(metric, field_name)
+                if value is not None and value < 0:
+                    errors.append((field_name, f"{field_name} must be >= 0"))
     return errors
 
 
