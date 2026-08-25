@@ -140,6 +140,8 @@ NOTE_METRIC_COUNTER_FIELDS = (
 def validate_import_payload(payload: AccountImportIn) -> list[ValidationError]:
     """Business-rule checks layered on top of pydantic type validation."""
     errors: list[ValidationError] = []
+    if not (payload.platform_uid or "").strip():
+        errors.append(("platform_uid", "platform_uid is required"))
     if not (payload.nickname or "").strip():
         errors.append(("nickname", "nickname is required"))
     if payload.violation_count_180d is not None and payload.violation_count_180d < 0:

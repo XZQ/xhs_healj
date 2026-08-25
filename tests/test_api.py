@@ -1697,3 +1697,84 @@ def test_update_endpoints_reject_null_and_duplicate_name() -> None:
                 json={field_name: None},
             )
             assert response.status_code == 422, field_name
+
+
+def test_import_file_parse_errors_return_422() -> None:
+    """Garbage .xlsx bytes and non-UTF-8 text must 422, not crash as 500."""
+    with TestClient(app) as client:
+        fake_xlsx = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("data.xlsx", b"not really a zip file at all", "application/octet-stream")},
+        )
+        assert fake_xlsx.status_code == 422
+
+        gbk_csv = client.post(
+            "/api/v1/imports/account-metrics-file",
+            files={"file": ("gbk.csv", "platform_uid,nickname\nu1,测试\n".encode("gbk"), "text/csv")},
+        )
+        assert gbk_csv.status_code == 422
+
+
+def test_report_exports_neutralize_formula_cells() -> None:
+    """User-controlled fields starting with =/+/-/@ must not land raw in
+    spreadsheet exports: Excel executes them and openpyxl stores '=' strings
+    as formula cells."""
+    suffix = uuid4().hex
+    with TestClient(app) as client:
+        imported = client.post(
+            "/api/v1/imports/accounts",
+            json={
+                "accounts": [
+                    {
+                        "platform_uid": f"=cmd|'/C calc'!A1{suffix}",
+                        "nickname": '=1+1&HYPERLINK("http://evil")',
+                        "category": "@evil",
+                    }
+                ]
+            },
+        )
+        assert imported.status_code == 200
+
+        csv_export = client.get("/api/v1/reports/accounts.csv")
+        assert csv_export.status_code == 200
+        for line in csv_export.text.splitlines():
+            for cell in line.split(","):
+                assert not cell.startswith(("=", "+", "-", "@")), line
+
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        xlsx_export = client.get("/api/v1/reports/accounts.xlsx")
+        sheet = load_workbook(BytesIO(xlsx_export.content)).active
+        formula_cells = [
+            cell.coordinate
+            for row in sheet.iter_rows(min_row=2)
+            for cell in row
+            if cell.data_type == "f"
+        ]
+        assert formula_cells == []
+
+
+def test_blank_identity_rejected() -> None:
+    json_headers = {"Content-Type": "application/json"}
+    suffix = uuid4().hex
+    with TestClient(app) as client:
+        blank_create = client.post(
+            "/api/v1/accounts", content=b'{"platform_uid":"","nickname":" "}', headers=json_headers
+        )
+        assert blank_create.status_code == 422
+
+        blank_import = client.post(
+            "/api/v1/imports/accounts",
+            json={"accounts": [{"platform_uid": "", "nickname": f"blank_{suffix}"}]},
+        )
+        assert blank_import.status_code == 200
+        assert blank_import.json()["accounts_upserted"] == 0
+        assert blank_import.json()["error_rows"] == 1
+
+        valid = client.post(
+            "/api/v1/accounts",
+            json={"platform_uid": f"ok_{suffix}", "nickname": "Fine"},
+        )
+        assert valid.status_code == 200

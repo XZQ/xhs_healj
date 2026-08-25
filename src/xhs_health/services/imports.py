@@ -3,6 +3,7 @@ import math
 from datetime import date
 from io import BytesIO, StringIO
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -141,7 +142,15 @@ def import_accounts(
 
 
 def import_flat_file(session: Session, filename: str, content: bytes) -> ImportAccountsResponse:
-    rows = _read_rows(filename, content)
+    try:
+        rows = _read_rows(filename, content)
+    except HTTPException:
+        raise
+    except Exception as exc:  # garbage .xlsx bytes, non-UTF-8 text, corrupt workbook
+        raise HTTPException(
+            status_code=422,
+            detail=f"import file could not be parsed as UTF-8 CSV or XLSX: {type(exc).__name__}",
+        ) from exc
     batch = ImportBatch(filename=filename, total_rows=len(rows), valid_rows=0, error_rows=0)
     session.add(batch)
     session.flush()

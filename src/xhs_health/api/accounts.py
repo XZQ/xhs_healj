@@ -43,6 +43,10 @@ def _latest_scores_for(session: Session, account_ids: list[int]) -> dict[int, Sc
 
 @router.post("", response_model=AccountOut)
 def create_account(payload: AccountCreate, session: Session = Depends(get_session)) -> AccountOut:
+    if not payload.platform_uid.strip() or not payload.nickname.strip():
+        raise HTTPException(
+            status_code=422, detail="platform_uid and nickname must not be blank"
+        )
     existing = session.scalar(select(Account).where(Account.platform_uid == payload.platform_uid))
     if existing:
         raise HTTPException(status_code=409, detail="platform_uid already exists")

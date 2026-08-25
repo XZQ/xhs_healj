@@ -29,6 +29,16 @@ REPORT_COLUMNS = [
     "unresolved_alerts",
 ]
 
+# Cells a spreadsheet app may interpret as formulas (=cmd|..., =HYPERLINK(...)).
+# openpyxl stores "=" strings as formula cells too, so both writers sanitize.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell_safe(value):
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
 
 def _latest_scores_by_account(session: Session) -> dict[int, Score]:
     """Latest score per account by (score_date, created_at) in one query."""
@@ -75,13 +85,13 @@ def export_accounts_report(session: Session = Depends(get_session)) -> Streaming
         writer.writerow(
             [
                 account.id,
-                account.platform_uid,
-                account.nickname,
-                account.category or "",
+                _cell_safe(account.platform_uid),
+                _cell_safe(account.nickname),
+                _cell_safe(account.category or ""),
                 account.status,
                 f"{float(latest_score.total_score):.2f}" if latest_score else "",
-                latest_score.health_level if latest_score else "",
-                latest_score.confidence_level if latest_score else "",
+                _cell_safe(latest_score.health_level) if latest_score else "",
+                _cell_safe(latest_score.confidence_level) if latest_score else "",
                 latest_score.score_date.isoformat() if latest_score else "",
                 unresolved_alerts,
             ]
@@ -107,13 +117,13 @@ def export_accounts_xlsx_report(session: Session = Depends(get_session)) -> Stre
         sheet.append(
             [
                 account.id,
-                account.platform_uid,
-                account.nickname,
-                account.category or "",
+                _cell_safe(account.platform_uid),
+                _cell_safe(account.nickname),
+                _cell_safe(account.category or ""),
                 account.status,
                 float(latest_score.total_score) if latest_score else None,
-                latest_score.health_level if latest_score else "",
-                latest_score.confidence_level if latest_score else "",
+                _cell_safe(latest_score.health_level) if latest_score else "",
+                _cell_safe(latest_score.confidence_level) if latest_score else "",
                 latest_score.score_date.isoformat() if latest_score else "",
                 unresolved_alerts,
             ]
